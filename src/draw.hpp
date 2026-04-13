@@ -10,31 +10,53 @@
 //----------------------------------------------------------------------------//
 
 #define FRAMES_IN_FLIGHT 2
-#define DRAW_NUM_PARTICLES 80128
-#define DRAW_NUM_STARS 75000
+#define DRAW_NUM_PARTICLES 131072
+#define DRAW_DEFAULT_NUM_STARS 40000
+#define DRAW_DEFAULT_NUM_DUST 38400
+
+enum ParticleDisplayFlags : uint32
+{
+	PARTICLE_DISPLAY_STARS     = 1u << 0,
+	PARTICLE_DISPLAY_DUST      = 1u << 1,
+	PARTICLE_DISPLAY_FILAMENTS = 1u << 2,
+	PARTICLE_DISPLAY_H2        = 1u << 3,
+};
 
 struct ParticleParamsVertGPU
 {
 	f32 time;
-
-	uint32 numStars;
+	f32 timeStepYears;
+	uint32 activeParticles;
+	uint32 displayFlags;
+	uint32 perturbationCount;
 
 	f32 starSize;
 	f32 dustSize;
 	f32 h2Size;
 
 	f32 h2Dist;
+	f32 perturbationDamping;
+	f32 viewportHeight;
+	f32 verticalFovDegrees;
 };
 
 struct ParticleGenParamsGPU
 {
 	uint32 numStars;
+	uint32 numDust;
+	uint32 numFilaments;
+	uint32 numH2Regions;
+	uint32 hasDarkMatter;
+	uint32 _padding0;
+	uint32 _padding1;
+	uint32 _padding2;
 
-	f32 maxRad;
-	f32 bulgeRad;
-
+	f32 galaxyRad;
+	f32 coreRad;
+	f32 farFieldRad;
 	f32 angleOffset;
-	f32 eccentricity;
+	f32 exInner;
+	f32 exOuter;
 
 	f32 baseHeight;
 	f32 height;
@@ -48,8 +70,6 @@ struct ParticleGenParamsGPU
 
 	f32 minDustOpacity;
 	f32 maxDustOpacity;
-
-	f32 speed;
 };
 
 struct DrawImGuiPushConstants
@@ -107,6 +127,7 @@ struct DrawState
 	ParticleParamsVertGPU particleVertParams;
 	bool particleGenerationDirty;
 	bool particleTimePaused;
+	bool showGrid;
 
 	VKHgraphicsPipeline* imguiPipeline;
 	VKHdescriptorSets* imguiDescriptorSets;
@@ -141,6 +162,7 @@ struct GalaxyParticle
 	f32 angleVel;
 	f32 opacity;
 	f32 temp;
+	uint32 type;
 };
 
 //----------------------------------------------------------------------------//
@@ -168,5 +190,10 @@ void draw_imgui_begin_frame(DrawState* state, f32 dt);
 void draw_imgui_add_scroll(DrawState* state, f32 x, f32 y);
 
 void draw_render(DrawState* state, DrawParams* params, f32 dt);
+
+uint32 draw_get_galaxy_preset_count(void);
+const char* draw_get_galaxy_preset_name(uint32 idx);
+bool draw_apply_galaxy_preset(DrawState* state, uint32 idx);
+uint32 draw_get_active_particle_count(const DrawState* state);
 
 #endif

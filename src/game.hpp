@@ -28,6 +28,7 @@ struct GameState
     DrawState* drawState;
 
     GameCamera cam;
+	int32 selectedPreset;
 };
 
 //----------------------------------------------------------------------------//

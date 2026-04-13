@@ -2,10 +2,11 @@
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-//theres no way floating point allows this much precision lol
-#define PI 3.1415926535897932384626433832795028841971693993751058209749445923078164062
-
-//----------------------------------------------------------------------------//
+#define PI 3.1415926535897932384626433832795
+#define PC_TO_KM 30856775812900.0
+#define SEC_PER_YEAR 31557600.0
+#define G_CONST 6.672e-11
+#define FILAMENT_PARTICLES_PER_CLUSTER 48u
 
 struct Particle
 {
@@ -16,51 +17,47 @@ struct Particle
 	float angleVel;
 	float opacity;
 	float temp;
+	uint type;
 };
-
-//----------------------------------------------------------------------------//
 
 layout(std140, binding = 0) buffer Particles
 {
 	Particle particles[];
 };
 
-//----------------------------------------------------------------------------//
-
 layout(push_constant) uniform Params
 {
 	uint u_numStars;
+	uint u_numDust;
+	uint u_numFilaments;
+	uint u_numH2Regions;
+	uint u_hasDarkMatter;
+	uint u_padding0;
+	uint u_padding1;
+	uint u_padding2;
 
-	float u_maxRad;
-	float u_bulgeRad;
-
+	float u_galaxyRad;
+	float u_coreRad;
+	float u_farFieldRad;
 	float u_angleOffset;
-	float u_eccentricity;
+	float u_exInner;
+	float u_exOuter;
 
 	float u_baseHeight;
 	float u_height;
-
 	float u_minTemp;
 	float u_maxTemp;
 	float u_dustBaseTemp;
 
 	float u_minStarOpacity;
 	float u_maxStarOpacity;
-
 	float u_minDustOpacity;
 	float u_maxDustOpacity;
-
-	float u_speed;
 };
-
-//----------------------------------------------------------------------------//
-
-//source: http://www.gamedev.net/topic/592001-random-number-generation-based-on-time-in-hlsl/
-//(says it is from the NVidia Direct3D 10 SDK but i could not find the SDK download to verify)
 
 #define RANDOM_IA 16807
 #define RANDOM_IM 2147483647
-#define RANDOM_AM 1.0 / float(RANDOM_IM)
+#define RANDOM_AM (1.0 / float(RANDOM_IM))
 #define RANDOM_IQ 127773
 #define RANDOM_IR 2836
 #define RANDOM_MASK 123459876
@@ -73,7 +70,7 @@ void srand_cycle()
 	int k = _SEED / RANDOM_IQ;
 	_SEED = RANDOM_IA * (_SEED - k * RANDOM_IQ) - RANDOM_IR * k;
 
-	if (_SEED < 0)
+	if(_SEED < 0)
 		_SEED += RANDOM_IM;
 
 	_SEED ^= RANDOM_MASK;
@@ -91,11 +88,9 @@ float rand()
 	return RANDOM_AM * _SEED;
 }
 
-//----------------------------------------------------------------------------//
-
 float ease_in_exp(float x)
 {
-	return x <= 0.0 ? 0.0 : pow(2, 10.0 * x - 10.0);
+	return x <= 0.0 ? 0.0 : pow(2.0, 10.0 * x - 10.0);
 }
 
 float ease_in_circ(float x)
@@ -103,82 +98,261 @@ float ease_in_circ(float x)
 	return x >= 1.0 ? 1.0 : 1.0 - sqrt(1.0 - x * x);
 }
 
-//----------------------------------------------------------------------------//
-
-float rand_height()
+float intensity_bulge(float r, float i0, float k)
 {
-	float r = ease_in_circ(rand());
-	if(rand() < 0.5)
-		r *= -1;
-
-	return u_baseHeight + (u_height * 0.5) * r; 
+	return i0 * exp(-k * pow(r, 0.25));
 }
 
-float rand_height_bulge(float rad)
+float intensity_disc(float r, float i0, float a)
+{
+	return i0 * exp(-r / a);
+}
+
+float realistic_intensity(float r)
+{
+	float i0 = 1.0;
+	float k = 0.02;
+	float a = u_galaxyRad / 3.0;
+	if(r < u_coreRad)
+		return intensity_bulge(r, i0, k);
+
+	float edgeIntensity = intensity_bulge(u_coreRad, i0, k);
+	return intensity_disc(r - u_coreRad, edgeIntensity, a);
+}
+
+float sample_realistic_radius()
+{
+	float rad = 0.0;
+	for(int iter = 0; iter < 32; ++iter)
+	{
+		rad = rand() * u_farFieldRad;
+		if(rand() <= realistic_intensity(rad))
+			return rad;
+	}
+
+	return min(rand() * u_galaxyRad, u_farFieldRad);
+}
+
+float mass_disc(float r)
+{
+	const float discThickness = 2000.0;
+	const float rho0 = 1.0;
+	const float halfRadius = 2000.0;
+	return rho0 * exp(-r / halfRadius) * (r * r) * PI * discThickness;
+}
+
+float mass_halo(float r)
+{
+	const float rho0 = 0.15;
+	const float coreRadius = 2500.0;
+	return rho0 / (1.0 + pow(r / coreRadius, 2.0)) * (4.0 * PI * pow(r, 3.0) / 3.0);
+}
+
+float orbital_velocity(float r)
+{
+	if(r <= 0.0)
+		return 0.0;
+
+	float velKms;
+	if(u_hasDarkMatter != 0u)
+		velKms = 20000.0 * sqrt(G_CONST * (mass_halo(r) + mass_disc(r) + 100.0) / r);
+	else
+		velKms = 20000.0 * sqrt(G_CONST * (mass_disc(r) + 100.0) / r);
+
+	float circumference = 2.0 * PI * r * PC_TO_KM;
+	float timeYears = circumference / (velKms * SEC_PER_YEAR);
+	return (timeYears > 0.0) ? (2.0 * PI / timeYears) : 0.0;
+}
+
+float random_height()
 {
 	float r = ease_in_circ(rand());
 	if(rand() < 0.5)
-		r *= -1;
+		r *= -1.0;
 
-	float bound = (u_height * 0.5) + (u_height * 0.5) * cos(PI * rad / u_bulgeRad);
+	return u_baseHeight + (u_height * 0.5) * r;
+}
 
+float random_height_bulge(float rad)
+{
+	float r = ease_in_circ(rand());
+	if(rand() < 0.5)
+		r *= -1.0;
+
+	float safeCore = max(u_coreRad, 1.0);
+	float bound = (u_height * 0.5) + (u_height * 0.5) * cos(PI * rad / safeCore);
 	return u_baseHeight + bound * r;
 }
 
-float rand_height_bulge_dust(float rad)
+float random_height_bulge_dust(float rad)
 {
 	float r = ease_in_circ(rand());
 	if(rand() < 0.5)
-		r *= -1;
+		r *= -1.0;
 
-	float bound = (u_height * 0.5) * cos(PI * rad / u_bulgeRad);
-
+	float safeCore = max(u_coreRad, 1.0);
+	float bound = (u_height * 0.5) * cos(PI * rad / safeCore);
 	return u_baseHeight + bound * r;
 }
 
-//----------------------------------------------------------------------------//
+float get_excentricity(float r)
+{
+	float safeCore = max(u_coreRad, 1.0);
+	float safeGalaxy = max(u_galaxyRad, safeCore + 1.0);
+	float safeFarField = max(u_farFieldRad, safeGalaxy + 1.0);
+
+	if(r < safeCore)
+		return 1.0 + (r / safeCore) * (u_exInner - 1.0);
+	else if(r <= safeGalaxy)
+		return u_exInner + (r - safeCore) / (safeGalaxy - safeCore) * (u_exOuter - u_exInner);
+	else if(r < safeFarField)
+		return u_exOuter + (r - safeGalaxy) / (safeFarField - safeGalaxy) * (1.0 - u_exOuter);
+
+	return 1.0;
+}
+
+float get_angular_offset(float r)
+{
+	return r * u_angleOffset;
+}
+
+void write_inactive_particle(uint idx)
+{
+	particles[idx].pos = vec2(0.0);
+	particles[idx].height = 0.0;
+	particles[idx].angle = 0.0;
+	particles[idx].tiltAngle = 0.0;
+	particles[idx].angleVel = 0.0;
+	particles[idx].opacity = 0.0;
+	particles[idx].temp = 0.0;
+	particles[idx].type = 255u;
+}
 
 void main()
 {
-	srand_set(int(gl_GlobalInvocationID.x));
+	uint idx = gl_GlobalInvocationID.x;
+	uint filamentCount = u_numFilaments;
+	uint h2Count = u_numH2Regions * 2u;
+	uint totalParticleCount = u_numStars + u_numDust + filamentCount + h2Count;
+
+	if(idx >= totalParticleCount)
+	{
+		write_inactive_particle(idx);
+		return;
+	}
 
 	Particle particle;
-	if(gl_GlobalInvocationID.x < u_numStars) //star
-	{
-		float rad = ease_in_exp(rand()) * u_maxRad;
+	particle.height = 0.0;
+	particle.angle = 0.0;
+	particle.tiltAngle = 0.0;
+	particle.angleVel = 0.0;
+	particle.opacity = 0.0;
+	particle.temp = 0.0;
+	particle.type = 255u;
 
-		particle.pos = vec2(rad, u_eccentricity * rad);
+	if(idx == 0u)
+	{
+		particle.pos = vec2(0.0);
+		particle.height = u_baseHeight;
+		particle.temp = 6000.0;
+		particle.opacity = 1.0;
+		particle.type = 0u;
+		particles[idx] = particle;
+		return;
+	}
+
+	if(idx < u_numStars)
+	{
+		uint starIdx = idx;
+		srand_set(int(starIdx + 1001u));
+
+		float rad = sample_realistic_radius();
+		float ex = get_excentricity(rad);
+
+		particle.pos = vec2(rad, rad * ex);
 		particle.angle = rand() * 2.0 * PI;
-		particle.tiltAngle = (rad / u_maxRad) * u_angleOffset;
-		particle.angleVel = -u_speed * sqrt(1.0 / rad);
-		particle.temp = u_minTemp + (u_maxTemp - u_minTemp) * rand();
+		particle.tiltAngle = get_angular_offset(rad);
+		particle.angleVel = orbital_velocity(rad);
+		particle.temp = u_dustBaseTemp + (2000.0 * rand() - 1000.0);
 		particle.opacity = u_minStarOpacity + (u_maxStarOpacity - u_minStarOpacity) * rand();
-
-		if(rad < u_bulgeRad)
-			particle.height = rand_height_bulge(rad);
-		else
-			particle.height = rand_height();
+		if(idx < max(1u, u_numStars / 60u))
+			particle.opacity = min(particle.opacity + 0.2 + rand() * 0.3, 1.0);
+		particle.height = (rad < u_coreRad) ? random_height_bulge(rad) : random_height();
+		particle.type = 0u;
 	}
-	else //dust
+	else if(idx < u_numStars + u_numDust)
 	{
+		uint dustIdx = idx - u_numStars;
+		srand_set(int(dustIdx + 50001u));
 		float rad;
-		if(gl_GlobalInvocationID.x % 2 == 0)
-			rad = rand() * u_maxRad;
+		if((dustIdx & 1u) == 0u)
+		{
+			rad = sample_realistic_radius();
+		}
 		else
-			rad = ease_in_exp(rand()) * u_maxRad;
+		{
+			float x = 2.0 * u_galaxyRad * rand() - u_galaxyRad;
+			float y = 2.0 * u_galaxyRad * rand() - u_galaxyRad;
+			rad = sqrt(x * x + y * y);
+		}
 
-		particle.pos = vec2(rad, u_eccentricity * rad);
+		float ex = get_excentricity(rad);
+		particle.pos = vec2(rad, rad * ex);
 		particle.angle = rand() * 2.0 * PI;
-		particle.tiltAngle = (rad / u_maxRad) * u_angleOffset;
-		particle.angleVel = -u_speed * sqrt(1.0 / rad);
-		particle.temp = u_dustBaseTemp + 2.0 * rad;
-		particle.opacity = u_minDustOpacity + (u_maxDustOpacity - u_minDustOpacity) * rand();
+		particle.tiltAngle = get_angular_offset(rad);
+		particle.angleVel = orbital_velocity((particle.pos.x + particle.pos.y) * 0.5);
+		particle.temp = u_dustBaseTemp + rad / 4.5;
+		particle.opacity = 1.3 * (u_minDustOpacity + (u_maxDustOpacity - u_minDustOpacity) * rand());
+		particle.height = (rad < u_coreRad) ? random_height_bulge_dust(rad) : u_baseHeight;
+		particle.type = 1u;
+	}
+	else if(idx < u_numStars + u_numDust + filamentCount)
+	{
+		uint filamentIdx = idx - (u_numStars + u_numDust);
+		uint particleInCluster = filamentIdx % FILAMENT_PARTICLES_PER_CLUSTER;
+		uint clusterIdx = filamentIdx / FILAMENT_PARTICLES_PER_CLUSTER;
+		srand_set(int(clusterIdx + 9817u));
 
-		if(rad < u_bulgeRad)
-			particle.height = rand_height_bulge_dust(rad);
-		else
-			particle.height = u_baseHeight;
+		float x = 2.0 * u_galaxyRad * rand() - u_galaxyRad;
+		float y = 2.0 * u_galaxyRad * rand() - u_galaxyRad;
+		float baseRad = sqrt(x * x + y * y);
+		float theta = rand() * 2.0 * PI;
+		float mag = 0.1 + 0.05 * rand();
+
+		srand_set(int(idx + particleInCluster * 17u));
+		float rad = baseRad + 200.0 - 400.0 * rand();
+		float ex = get_excentricity(rad);
+
+		particle.pos = vec2(rad, rad * ex);
+		particle.angle = theta + radians(10.0 - 20.0 * rand());
+		particle.tiltAngle = get_angular_offset(rad);
+		particle.angleVel = orbital_velocity((particle.pos.x + particle.pos.y) * 0.5);
+		particle.temp = u_dustBaseTemp + rad / 4.5 - 1000.0;
+		particle.opacity = (mag + 0.025 * rand()) * 0.715;
+		particle.height = (rad < u_coreRad) ? random_height_bulge_dust(rad) : u_baseHeight;
+		particle.type = 2u;
+	}
+	else
+	{
+		uint h2Idx = idx - (u_numStars + u_numDust + filamentCount);
+		uint regionIdx = h2Idx / 2u;
+		bool coreHighlight = (h2Idx & 1u) == 1u;
+
+		srand_set(int(regionIdx + 150001u));
+		float x = 2.0 * u_galaxyRad * rand() - u_galaxyRad;
+		float y = 2.0 * u_galaxyRad * rand() - u_galaxyRad;
+		float rad = sqrt(x * x + y * y);
+		float ex = get_excentricity(rad);
+
+		particle.pos = vec2(rad, rad * ex);
+		particle.angle = rand() * 2.0 * PI;
+		particle.tiltAngle = get_angular_offset(rad);
+		particle.angleVel = orbital_velocity((particle.pos.x + particle.pos.y) * 0.5);
+		particle.temp = u_dustBaseTemp + 3000.0 * rand() - 1500.0;
+		particle.opacity = 0.05 + 0.03 * rand();
+		particle.height = (rad < u_coreRad) ? random_height() : u_baseHeight;
+		particle.type = coreHighlight ? 4u : 3u;
 	}
 
-	particles[gl_GlobalInvocationID.x] = particle;
+	particles[idx] = particle;
 }

@@ -37,6 +37,37 @@ struct GridParamsFragGPU
 	f32 scroll;
 };
 
+struct GalaxyPreset
+{
+	const char* name;
+	f32 galaxyRad;
+	f32 coreRad;
+	f32 angleOffset;
+	f32 exInner;
+	f32 exOuter;
+	uint32 numStars;
+	bool hasDarkMatter;
+	uint32 perturbationCount;
+	f32 perturbationDamping;
+	f32 dustRenderSize;
+	f32 dustBaseTemp;
+};
+
+static constexpr uint32 DRAW_H2_REGION_COUNT = 400;
+static constexpr uint32 DRAW_FILAMENT_PARTICLES_DEFAULT = 19200;
+
+static const GalaxyPreset GALAXY_PRESETS[] = {
+	{"Sample 1", 13000.0f, 4000.0f, 0.0004f, 0.85f, 0.95f, 40000u, true, 2u, 40.0f, 40.0f, 4000.0f},
+	{"Sample 2", 16000.0f, 4000.0f, 0.0003f, 0.80f, 0.85f, 40000u, true, 0u, 40.0f, 38.0f, 4500.0f},
+	{"Sample 3", 13000.0f, 4000.0f, 0.00064f, 0.90f, 0.90f, 40000u, true, 0u, 0.0f, 41.0f, 4100.0f},
+	{"Sample 4", 13000.0f, 4000.0f, 0.0004f, 1.35f, 1.05f, 40000u, true, 0u, 0.0f, 39.0f, 4500.0f},
+	{"Sample 5", 13000.0f, 4500.0f, 0.0002f, 0.65f, 0.95f, 40000u, true, 3u, 72.0f, 42.0f, 4000.0f},
+	{"Sample 6", 15000.0f, 4000.0f, 0.0003f, 1.45f, 1.00f, 40000u, true, 0u, 0.0f, 42.0f, 4500.0f},
+	{"Sample 7", 14000.0f, 12500.0f, 0.0002f, 0.65f, 0.95f, 40000u, true, 3u, 72.0f, 43.0f, 2200.0f},
+	{"Sample 8", 13000.0f, 1500.0f, 0.0004f, 1.10f, 1.00f, 40000u, true, 1u, 20.0f, 42.0f, 2800.0f},
+	{"Sample 9", 13000.0f, 4000.0f, 0.0004f, 0.85f, 0.95f, 40000u, true, 1u, 20.0f, 41.0f, 4500.0f},
+};
+
 static bool _draw_create_depth_buffer(DrawState* state);
 static void _draw_destroy_depth_buffer(DrawState* state);
 
@@ -84,6 +115,10 @@ static void _draw_destroy_particle_descriptors(DrawState* state);
 static bool _draw_initialize_particles(DrawState* state);
 
 static void _draw_set_default_particle_params(DrawState* state);
+static uint32 _draw_get_h2_particle_count(void);
+static uint32 _draw_get_requested_particle_count(const DrawState* state);
+static void _draw_clamp_particle_counts(DrawState* state);
+static void _draw_apply_preset(DrawState* state, const GalaxyPreset& preset);
 
 static bool _draw_create_imgui_pipeline(DrawState* state);
 static void _draw_destroy_imgui_pipeline(DrawState* state);
@@ -98,6 +133,7 @@ static bool _draw_ensure_imgui_buffers(DrawState* state, uint32 frameIndex, VkDe
 
 static void _draw_record_render_pass_start_commands(DrawState* s, VkCommandBuffer commandBuffer, uint32 frameIndex, uint32 imageIdx);
 
+static void _draw_record_single_particle_pass(DrawState* s, VkCommandBuffer commandBuffer, uint32 frameIndex, uint32 displayFlags);
 static void _draw_record_particle_commands(DrawState* s, DrawParams* params, VkCommandBuffer commandBuffer, uint32 frameIndex, uint32 imageIdx);
 static void _draw_record_grid_commands(DrawState* s, DrawParams* params, VkCommandBuffer commandBuffer, uint32 frameIndex, uint32 imageIdx);
 static void _draw_record_imgui_commands(DrawState* s, VkCommandBuffer commandBuffer, uint32 frameIndex);
@@ -105,6 +141,7 @@ static void _draw_record_imgui_commands(DrawState* s, VkCommandBuffer commandBuf
 //----------------------------------------------------------------------------//
 
 static void _draw_window_resized(DrawState* state);
+static void _draw_abort_imgui_frame(void);
 
 //----------------------------------------------------------------------------//
 
@@ -175,6 +212,7 @@ bool draw_init(DrawState** state)
 		return false;
 
 	_draw_set_default_particle_params(s);
+	_draw_apply_preset(s, GALAXY_PRESETS[0]);
 	if(!_draw_initialize_particles(s))
 		return false;
 
@@ -303,11 +341,13 @@ void draw_render(DrawState* s, DrawParams* params, f32 dt)
 													   s->imageAvailableSemaphores[frameIdx], VK_NULL_HANDLE, &imageIdx);
 	if(imageAquireResult == VK_ERROR_OUT_OF_DATE_KHR || imageAquireResult == VK_SUBOPTIMAL_KHR)
 	{
+		_draw_abort_imgui_frame();
 		_draw_window_resized(s);
 		return;
 	}
 	else if(imageAquireResult != VK_SUCCESS)
 	{
+		_draw_abort_imgui_frame();
 		ERROR_LOG("failed to acquire swapchain image");
 		return;
 	}
@@ -390,6 +430,39 @@ void draw_render(DrawState* s, DrawParams* params, f32 dt)
 		ERROR_LOG("failed to present swapchain image");
 
 	frameIdx = (frameIdx + 1) % FRAMES_IN_FLIGHT;
+}
+
+static void _draw_abort_imgui_frame(void)
+{
+	ImGui::EndFrame();
+}
+
+uint32 draw_get_galaxy_preset_count(void)
+{
+	return (uint32)(sizeof(GALAXY_PRESETS) / sizeof(GALAXY_PRESETS[0]));
+}
+
+const char* draw_get_galaxy_preset_name(uint32 idx)
+{
+	if(idx >= draw_get_galaxy_preset_count())
+		return "";
+	return GALAXY_PRESETS[idx].name;
+}
+
+bool draw_apply_galaxy_preset(DrawState* s, uint32 idx)
+{
+	if(!s || idx >= draw_get_galaxy_preset_count())
+		return false;
+
+	_draw_apply_preset(s, GALAXY_PRESETS[idx]);
+	return true;
+}
+
+uint32 draw_get_active_particle_count(const DrawState* s)
+{
+	if(!s)
+		return 0u;
+	return _draw_get_requested_particle_count(s);
 }
 
 //----------------------------------------------------------------------------//
@@ -985,31 +1058,125 @@ static void _draw_destroy_particle_descriptors(DrawState* s)
 
 static void _draw_set_default_particle_params(DrawState* s)
 {
-	s->particleGenParams.numStars = DRAW_NUM_STARS;
-	s->particleGenParams.maxRad = 3500.0f;
-	s->particleGenParams.bulgeRad = 1250.0f;
-	s->particleGenParams.angleOffset = 6.28f;
-	s->particleGenParams.eccentricity = 0.85f;
-	s->particleGenParams.baseHeight = 300.0f;
-	s->particleGenParams.height = 250.0f;
+	s->particleGenParams.numStars = DRAW_DEFAULT_NUM_STARS;
+	s->particleGenParams.numDust = DRAW_DEFAULT_NUM_DUST;
+	s->particleGenParams.numFilaments = DRAW_FILAMENT_PARTICLES_DEFAULT;
+	s->particleGenParams.numH2Regions = DRAW_H2_REGION_COUNT;
+	s->particleGenParams.hasDarkMatter = 1u;
+	s->particleGenParams._padding0 = 0u;
+	s->particleGenParams._padding1 = 0u;
+	s->particleGenParams._padding2 = 0u;
+	s->particleGenParams.galaxyRad = 13000.0f;
+	s->particleGenParams.coreRad = 4000.0f;
+	s->particleGenParams.farFieldRad = 26000.0f;
+	s->particleGenParams.angleOffset = 0.0004f;
+	s->particleGenParams.exInner = 0.85f;
+	s->particleGenParams.exOuter = 0.95f;
+	s->particleGenParams.baseHeight = 0.0f;
+	s->particleGenParams.height = 80.0f;
 	s->particleGenParams.minTemp = 3000.0f;
 	s->particleGenParams.maxTemp = 9000.0f;
 	s->particleGenParams.dustBaseTemp = 4000.0f;
-	s->particleGenParams.minStarOpacity = 0.1f;
-	s->particleGenParams.maxStarOpacity = 0.5f;
-	s->particleGenParams.minDustOpacity = 0.01f;
-	s->particleGenParams.maxDustOpacity = 0.05f;
-	s->particleGenParams.speed = 10.0f;
+	s->particleGenParams.minStarOpacity = 0.12f;
+	s->particleGenParams.maxStarOpacity = 0.55f;
+	s->particleGenParams.minDustOpacity = 0.015f;
+	s->particleGenParams.maxDustOpacity = 0.08f;
 
 	s->particleVertParams.time = 0.0f;
-	s->particleVertParams.numStars = s->particleGenParams.numStars;
-	s->particleVertParams.starSize = 10.0f;
-	s->particleVertParams.dustSize = 500.0f;
-	s->particleVertParams.h2Size = 150.0f;
+	s->particleVertParams.timeStepYears = 1000.0f;
+	s->particleVertParams.activeParticles = 0;
+	s->particleVertParams.displayFlags = PARTICLE_DISPLAY_STARS | PARTICLE_DISPLAY_DUST | PARTICLE_DISPLAY_FILAMENTS | PARTICLE_DISPLAY_H2;
+	s->particleVertParams.perturbationCount = 2u;
+	s->particleVertParams.starSize = 2.0f;
+	s->particleVertParams.dustSize = 40.0f;
+	s->particleVertParams.h2Size = 20.0f;
 	s->particleVertParams.h2Dist = 300.0f;
+	s->particleVertParams.perturbationDamping = 40.0f;
+	s->particleVertParams.viewportHeight = 1080.0f;
+	s->particleVertParams.verticalFovDegrees = 45.0f;
 
 	s->particleGenerationDirty = false;
 	s->particleTimePaused = false;
+	s->showGrid = false;
+
+	_draw_clamp_particle_counts(s);
+	s->particleVertParams.activeParticles = _draw_get_requested_particle_count(s);
+}
+
+static uint32 _draw_get_h2_particle_count(void)
+{
+	return 0u;
+}
+
+static uint32 _draw_get_requested_particle_count(const DrawState* s)
+{
+	return s->particleGenParams.numStars
+		+ s->particleGenParams.numDust
+		+ s->particleGenParams.numFilaments
+		+ s->particleGenParams.numH2Regions * 2u;
+}
+
+static void _draw_clamp_particle_counts(DrawState* s)
+{
+	uint32 total = _draw_get_requested_particle_count(s);
+	if(total <= DRAW_NUM_PARTICLES)
+		return;
+
+	uint32 overflow = total - DRAW_NUM_PARTICLES;
+	if(s->particleGenParams.numDust >= overflow)
+	{
+		s->particleGenParams.numDust -= overflow;
+		return;
+	}
+
+	overflow -= s->particleGenParams.numDust;
+	s->particleGenParams.numDust = 0u;
+	if(s->particleGenParams.numFilaments >= overflow)
+	{
+		s->particleGenParams.numFilaments -= overflow;
+		return;
+	}
+
+	overflow -= s->particleGenParams.numFilaments;
+	s->particleGenParams.numFilaments = 0u;
+	uint32 h2Particles = s->particleGenParams.numH2Regions * 2u;
+	if(h2Particles >= overflow)
+	{
+		s->particleGenParams.numH2Regions = (h2Particles - overflow) / 2u;
+		return;
+	}
+
+	overflow -= h2Particles;
+	s->particleGenParams.numH2Regions = 0u;
+	s->particleGenParams.numStars = (s->particleGenParams.numStars > overflow) ? (s->particleGenParams.numStars - overflow) : 0u;
+}
+
+static void _draw_apply_preset(DrawState* s, const GalaxyPreset& preset)
+{
+	s->particleGenParams.numStars = preset.numStars;
+	s->particleGenParams.numDust = DRAW_DEFAULT_NUM_DUST;
+	s->particleGenParams.numFilaments = DRAW_FILAMENT_PARTICLES_DEFAULT;
+	s->particleGenParams.numH2Regions = DRAW_H2_REGION_COUNT;
+	s->particleGenParams.hasDarkMatter = preset.hasDarkMatter ? 1u : 0u;
+	s->particleGenParams.galaxyRad = preset.galaxyRad;
+	s->particleGenParams.coreRad = preset.coreRad;
+	s->particleGenParams.farFieldRad = preset.galaxyRad * 2.0f;
+	s->particleGenParams.angleOffset = preset.angleOffset;
+	s->particleGenParams.exInner = preset.exInner;
+	s->particleGenParams.exOuter = preset.exOuter;
+	s->particleGenParams.dustBaseTemp = preset.dustBaseTemp;
+	s->particleGenParams.baseHeight = 0.0f;
+	s->particleGenParams.height = 80.0f;
+	s->particleGenParams.minTemp = preset.dustBaseTemp - 1000.0f;
+	s->particleGenParams.maxTemp = preset.dustBaseTemp + 1000.0f;
+
+	s->particleVertParams.perturbationCount = preset.perturbationCount;
+	s->particleVertParams.perturbationDamping = preset.perturbationDamping;
+	s->particleVertParams.dustSize = preset.dustRenderSize;
+
+	_draw_clamp_particle_counts(s);
+	s->particleVertParams.activeParticles = _draw_get_requested_particle_count(s);
+	s->particleGenerationDirty = true;
 }
 
 static bool _draw_create_imgui_pipeline(DrawState* s)
@@ -1342,6 +1509,9 @@ static void _draw_record_imgui_commands(DrawState* s, VkCommandBuffer commandBuf
 
 static bool _draw_initialize_particles(DrawState* s)
 {
+	_draw_clamp_particle_counts(s);
+	s->particleVertParams.activeParticles = _draw_get_requested_particle_count(s);
+
 	VKHcomputePipeline* pipeline;
 	VKHdescriptorSets* descriptorSets;
 
@@ -1400,7 +1570,7 @@ static bool _draw_initialize_particles(DrawState* s)
 	vkCmdBindPipeline(commandBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 	vkCmdBindDescriptorSets(commandBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSets->sets[0], 1, &dynamicOffset);
 	vkCmdPushConstants(commandBuf, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ParticleGenParamsGPU), &s->particleGenParams);
-	vkCmdDispatch(commandBuf, DRAW_NUM_PARTICLES / DRAW_PARTICLE_WORK_GROUP_SIZE, 1, 1);
+	vkCmdDispatch(commandBuf, (DRAW_NUM_PARTICLES + DRAW_PARTICLE_WORK_GROUP_SIZE - 1) / DRAW_PARTICLE_WORK_GROUP_SIZE, 1, 1);
 
 	vkh_end_single_time_command(s->instance, commandBuf);
 
@@ -1461,6 +1631,9 @@ static void _draw_record_render_pass_start_commands(DrawState* s, VkCommandBuffe
 
 static void _draw_record_grid_commands(DrawState* s, DrawParams* params, VkCommandBuffer commandBuffer, uint32 frameIndex, uint32 imageIdx)
 {
+	if(!s->showGrid)
+		return;
+
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, s->gridPipeline->pipeline);
 
 	//bind buffers:
@@ -1508,6 +1681,17 @@ static void _draw_record_grid_commands(DrawState* s, DrawParams* params, VkComma
 	vkCmdDrawIndexed(commandBuffer, 6, 1, 0, 0, 0);
 }
 
+static void _draw_record_single_particle_pass(DrawState* s, VkCommandBuffer commandBuffer, uint32 frameIndex, uint32 displayFlags)
+{
+	if((s->particleVertParams.displayFlags & displayFlags) == 0u)
+		return;
+
+	ParticleParamsVertGPU pushParams = s->particleVertParams;
+	pushParams.displayFlags = displayFlags;
+	vkCmdPushConstants(commandBuffer, s->particlePipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ParticleParamsVertGPU), &pushParams);
+	vkCmdDraw(commandBuffer, 6 * DRAW_NUM_PARTICLES, 1, 0, 0);
+}
+
 static void _draw_record_particle_commands(DrawState* s, DrawParams* params, VkCommandBuffer commandBuffer, uint32 frameIndex, uint32 imageIdx)
 {
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, s->particlePipeline->pipeline);
@@ -1520,14 +1704,16 @@ static void _draw_record_particle_commands(DrawState* s, DrawParams* params, VkC
 	//send vertex stage params:
 	//---------------
 	if(!s->particleTimePaused)
-		s->particleVertParams.time = (float)glfwGetTime();
-	s->particleVertParams.numStars = s->particleGenParams.numStars;
+		s->particleVertParams.time += s->particleVertParams.timeStepYears;
+	s->particleVertParams.activeParticles = _draw_get_requested_particle_count(s);
+	s->particleVertParams.viewportHeight = (f32)s->instance->swapchainExtent.height;
+	s->particleVertParams.verticalFovDegrees = params->cam.fov;
 
-	vkCmdPushConstants(commandBuffer, s->particlePipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ParticleParamsVertGPU), &s->particleVertParams);
-
-	//draw:
-	//---------------
-	vkCmdDraw(commandBuffer, 6 * DRAW_NUM_PARTICLES, 1, 0, 0);
+	//draw in separate passes so each type can be tuned and blended independently
+	_draw_record_single_particle_pass(s, commandBuffer, frameIndex, PARTICLE_DISPLAY_DUST);
+	_draw_record_single_particle_pass(s, commandBuffer, frameIndex, PARTICLE_DISPLAY_FILAMENTS);
+	_draw_record_single_particle_pass(s, commandBuffer, frameIndex, PARTICLE_DISPLAY_STARS);
+	_draw_record_single_particle_pass(s, commandBuffer, frameIndex, PARTICLE_DISPLAY_H2);
 }
 
 //----------------------------------------------------------------------------//

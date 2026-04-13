@@ -6,17 +6,14 @@ const vec3 VERTICES[NUM_VERTICES] = {
 	vec3( 0.5, 0.0, -0.5),
 	vec3(-0.5, 0.0,  0.5),
 	vec3( 0.5, 0.0, -0.5),
-	vec3(-0.5, 0.0,  0.5), 
+	vec3(-0.5, 0.0,  0.5),
 	vec3( 0.5, 0.0,  0.5)
 };
-
-//----------------------------------------------------------------------------//
 
 layout(location = 0) out vec2 o_texPos;
 layout(location = 1) out vec4 o_color;
 layout(location = 2) out flat uint o_type;
-
-//----------------------------------------------------------------------------//
+layout(location = 3) out flat uint o_displayFlags;
 
 struct Particle
 {
@@ -27,9 +24,8 @@ struct Particle
 	float angleVel;
 	float opacity;
 	float temp;
+	uint type;
 };
-
-//----------------------------------------------------------------------------//
 
 layout(binding = 0) uniform Camera
 {
@@ -41,14 +37,18 @@ layout(binding = 0) uniform Camera
 layout(push_constant) uniform Params
 {
 	float u_time;
-
-	uint u_numStars;
+	float u_timeStepYears;
+	uint u_activeParticles;
+	uint u_displayFlags;
+	uint u_perturbationCount;
 
 	float u_starSize;
 	float u_dustSize;
 	float u_h2Size;
-
 	float u_h2DistCheck;
+	float u_perturbationDamping;
+	float u_viewportHeight;
+	float u_verticalFovDegrees;
 };
 
 layout(std140, binding = 1) readonly buffer Particles
@@ -56,28 +56,55 @@ layout(std140, binding = 1) readonly buffer Particles
 	Particle particles[];
 };
 
-//----------------------------------------------------------------------------//
-
 float ease_in_circ(float x)
 {
 	return x >= 1.0 ? 1.0 : 1.0 - sqrt(1.0 - x * x);
 }
 
-//----------------------------------------------------------------------------//
-
 vec2 calc_pos(Particle particle)
 {
 	float angle = particle.angle + particle.angleVel * u_time;
-	
+
 	float cosAngle = cos(angle);
 	float sinAngle = sin(angle);
 	float cosTilt = cos(particle.tiltAngle);
 	float sinTilt = sin(particle.tiltAngle);
 
-	vec2 pos = particle.pos;
+	vec2 pos = vec2(
+		particle.pos.x * cosAngle * cosTilt - particle.pos.y * sinAngle * sinTilt,
+		particle.pos.x * cosAngle * sinTilt + particle.pos.y * sinAngle * cosTilt
+	);
 
-	return vec2(pos.x * cosAngle * cosTilt - pos.y * sinAngle * sinTilt,
-	            pos.x * cosAngle * sinTilt + pos.y * sinAngle * cosTilt);
+	if(u_perturbationCount > 0u && u_perturbationDamping > 0.0)
+	{
+		float amplitude = particle.pos.x / u_perturbationDamping;
+		float waveAngle = angle * (2.0 * float(u_perturbationCount));
+		pos.x += amplitude * sin(waveAngle);
+		pos.y += amplitude * cos(waveAngle);
+	}
+
+	return pos;
+}
+
+bool is_particle_enabled(uint particleType)
+{
+	if(particleType == 0u)
+		return (u_displayFlags & (1u << 0)) != 0u;
+	if(particleType == 1u)
+		return (u_displayFlags & (1u << 1)) != 0u;
+	if(particleType == 2u)
+		return (u_displayFlags & (1u << 2)) != 0u;
+	if(particleType == 3u || particleType == 4u)
+		return (u_displayFlags & (1u << 3)) != 0u;
+	return false;
+}
+
+float pixels_to_world(float pixelSize, vec3 centerWorldPos)
+{
+	float viewDepth = -(u_view * vec4(centerWorldPos, 1.0)).z;
+	viewDepth = max(viewDepth, 0.001);
+	float worldPerPixel = (2.0 * viewDepth * tan(radians(u_verticalFovDegrees) * 0.5)) / max(u_viewportHeight, 1.0);
+	return pixelSize * worldPerPixel;
 }
 
 vec3 color_from_temp(float temp)
@@ -87,26 +114,26 @@ vec3 color_from_temp(float temp)
 	const int numColors = 200;
 
 	const vec3 colors[200] = {
-		vec3(1       , 0.000000, 0.000000),
-		vec3(1       , 0.000672, 0.000000),
-		vec3(1       , 0.011348, 0.000000),
-		vec3(1       , 0.022136, 0.000000),
-		vec3(1       , 0.033018, 0.000000),
-		vec3(1       , 0.043977, 0.000000),
-		vec3(1       , 0.054999, 0.000000),
-		vec3(1       , 0.066070, 0.000000),
-		vec3(1       , 0.077177, 0.000000),
-		vec3(1       , 0.088301, 0.000000),
-		vec3(1       , 0.099455, 0.000000),
-		vec3(1       , 0.110607, 0.000000),
-		vec3(1       , 0.121756, 0.000000),
-		vec3(1       , 0.132894, 0.000000),
-		vec3(1       , 0.144013, 0.000000),
-		vec3(1       , 0.155107, 0.000000),
-		vec3(1       , 0.166171, 0.000000),
-		vec3(1       , 0.177198, 0.000000),
-		vec3(1       , 0.188184, 0.000000),
-		vec3(1       , 0.199125, 0.000000),
+		vec3(1       , -0.009872, -0.016682),
+		vec3(1       , 0.000672, -0.017383),
+		vec3(1       , 0.011348, -0.017984),
+		vec3(1       , 0.022136, -0.018468),
+		vec3(1       , 0.033018, -0.018821),
+		vec3(1       , 0.043977, -0.019028),
+		vec3(1       , 0.054999, -0.019075),
+		vec3(1       , 0.066070, -0.018950),
+		vec3(1       , 0.077177, -0.018639),
+		vec3(1       , 0.088301, -0.018133),
+		vec3(1       , 0.099455, -0.017421),
+		vec3(1       , 0.110607, -0.016495),
+		vec3(1       , 0.121756, -0.015346),
+		vec3(1       , 0.132894, -0.013967),
+		vec3(1       , 0.144013, -0.012353),
+		vec3(1       , 0.155107, -0.010499),
+		vec3(1       , 0.166171, -0.008401),
+		vec3(1       , 0.177198, -0.006055),
+		vec3(1       , 0.188184, -0.003458),
+		vec3(1       , 0.199125, -0.000610),
 		vec3(1       , 0.210015, 0.002490),
 		vec3(1       , 0.220853, 0.005844),
 		vec3(1       , 0.231633, 0.009450),
@@ -296,45 +323,73 @@ vec3 color_from_temp(float temp)
 	return colors[idx];
 }
 
-//----------------------------------------------------------------------------//
-
 void main()
 {
-	vec3 a_pos    = VERTICES[gl_VertexIndex % NUM_VERTICES];
+	uint particleIdx = gl_VertexIndex / NUM_VERTICES;
+	vec3 a_pos = VERTICES[gl_VertexIndex % NUM_VERTICES];
 	vec2 a_texPos = VERTICES[gl_VertexIndex % NUM_VERTICES].xz + vec2(0.5);
 
-	Particle particle = particles[gl_VertexIndex / NUM_VERTICES];
-	uint type = (gl_VertexIndex / NUM_VERTICES) > u_numStars ? 1 : 0;
-	if(type == 0 && gl_VertexIndex / NUM_VERTICES % 150 == 0)
-		type = 2;
+	if(particleIdx >= u_activeParticles)
+	{
+		o_texPos = vec2(0.0);
+		o_color = vec4(0.0);
+		o_type = 255u;
+		o_displayFlags = u_displayFlags;
+		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+		return;
+	}
 
-	float scale;
-	if(type == 0)
-		scale = u_starSize;
-	else if(type == 1)
-		scale = u_dustSize;
-	else
+	Particle particle = particles[particleIdx];
+	if(!is_particle_enabled(particle.type))
+	{
+		o_texPos = vec2(0.0);
+		o_color = vec4(0.0);
+		o_type = 255u;
+		o_displayFlags = u_displayFlags;
+		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+		return;
+	}
+
+	vec2 pos = calc_pos(particle);
+
+	float scale = 0.0;
+	if(particle.type == 0u)
+		scale = u_starSize * max(0.35, particle.opacity * 4.0);
+	else if(particle.type == 1u || particle.type == 2u)
+		scale = u_dustSize * max(0.12, particle.opacity * 10.0);
+	else if(particle.type == 3u)
 	{
 		Particle distTest = particle;
 		distTest.pos.x += u_h2DistCheck;
-
 		vec2 test = calc_pos(distTest);
-		vec2 test2 = calc_pos(particle);
-		float dist = distance(test, test2);
-		dist = ease_in_circ(dist / u_h2DistCheck);
-
-		scale = u_h2Size * (1.0 - dist);
+		float dist = ease_in_circ(distance(test, pos) / u_h2DistCheck);
+		scale = u_h2Size * max(0.1, 1.0 - dist);
+	}
+	else if(particle.type == 4u)
+	{
+		Particle distTest = particle;
+		distTest.pos.x += u_h2DistCheck;
+		vec2 test = calc_pos(distTest);
+		float dist = ease_in_circ(distance(test, pos) / u_h2DistCheck);
+		scale = (u_h2Size * 0.07) * max(0.1, 1.0 - dist);
 	}
 
 	vec3 camRight = vec3(u_view[0][0], u_view[1][0], u_view[2][0]);
-	vec3 camUp    = vec3(u_view[0][1], u_view[1][1], u_view[2][1]);
-	vec2 pos = calc_pos(particle);
-	vec3 worldspacePos = vec3(pos.x, particle.height, pos.y) + ((camRight * a_pos.x) + (camUp * a_pos.z)) * scale;
+	vec3 camUp = vec3(u_view[0][1], u_view[1][1], u_view[2][1]);
+	vec3 centerWorldPos = vec3(pos.x, particle.height, pos.y);
+	float billboardScale = pixels_to_world(scale, centerWorldPos);
+	vec3 worldspacePos = centerWorldPos + ((camRight * a_pos.x) + (camUp * a_pos.z)) * billboardScale;
 
 	vec3 color = color_from_temp(particle.temp);
-
+	if(particle.type == 3u)
+		color *= vec3(2.0, 0.5, 0.5) * particle.opacity;
+	else if(particle.type == 4u)
+		color = vec3(1.0);
+	else
+		color *= particle.opacity;
 	o_texPos = a_texPos;
 	o_color = vec4(color, particle.opacity);
-	o_type = type;
+	o_type = particle.type;
+	o_displayFlags = u_displayFlags;
 	gl_Position = u_viewProj * vec4(worldspacePos, 1.0);
 }
