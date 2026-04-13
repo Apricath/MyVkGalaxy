@@ -16,6 +16,9 @@ void _game_camera_update(GameCamera* cam, f32 dt, GLFWwindow* window);
 void _game_camera_cursor_moved(GameCamera* cam, f32 x, f32 y);
 void _game_camera_scroll(GameCamera* cam, f32 amt);
 void _game_apply_preset_camera(GameState* s);
+void _game_apply_selected_preset(GameState* s);
+void _game_start_preset_showcase(GameState* s);
+void _game_update_preset_showcase(GameState* s, f32 dt);
 
 //----------------------------------------------------------------------------//
 
@@ -63,6 +66,10 @@ bool game_init(GameState** state)
 	}
 
 	s->selectedPreset = 0;
+	s->presetShowcaseActive = false;
+	s->presetShowcaseTimer = 0.0f;
+	s->presetShowcaseIndex = 0u;
+	_game_apply_selected_preset(s);
 	_game_apply_preset_camera(s);
 
 	glfwSetWindowUserPointer(s->drawState->instance->window, s);
@@ -109,6 +116,8 @@ void game_main_loop(GameState* s)
 			accumFrames = 0;
 		}
 
+		_game_update_preset_showcase(s, dt);
+
 		draw_imgui_begin_frame(s->drawState, dt);
 		ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
 		ImGui::SetNextWindowSize(ImVec2(420.0f, 760.0f), ImGuiCond_FirstUseEver);
@@ -129,8 +138,9 @@ void game_main_loop(GameState* s)
 					bool selected = s->selectedPreset == (int32)presetIdx;
 					if(ImGui::Selectable(draw_get_galaxy_preset_name(presetIdx), selected))
 					{
+						s->presetShowcaseActive = false;
 						s->selectedPreset = (int32)presetIdx;
-						draw_apply_galaxy_preset(s->drawState, presetIdx);
+						_game_apply_selected_preset(s);
 						_game_apply_preset_camera(s);
 						regenerateParticles = true;
 					}
@@ -139,6 +149,9 @@ void game_main_loop(GameState* s)
 				}
 				ImGui::EndCombo();
 			}
+
+			if(s->presetShowcaseActive)
+				ImGui::Text("Preset showcase %u / %u, next switch in %.1fs", s->presetShowcaseIndex + 1u, draw_get_galaxy_preset_count(), 6.0f - s->presetShowcaseTimer);
 
 			if(ImGui::CollapsingHeader("Physics", ImGuiTreeNodeFlags_DefaultOpen))
 			{
@@ -317,6 +330,60 @@ void _game_apply_preset_camera(GameState* s)
 	s->cam.dist = CAMERA_MAX_DIST;
 }
 
+void _game_apply_selected_preset(GameState* s)
+{
+	if(!s || !s->drawState || s->selectedPreset < 0)
+		return;
+
+	draw_apply_galaxy_preset(s->drawState, (uint32)s->selectedPreset);
+	s->drawState->particleGenerationDirty = true;
+}
+
+void _game_start_preset_showcase(GameState* s)
+{
+	if(!s)
+		return;
+
+	s->presetShowcaseActive = true;
+	s->presetShowcaseTimer = 0.0f;
+	s->presetShowcaseIndex = 0u;
+	s->selectedPreset = 0;
+	_game_apply_selected_preset(s);
+	_game_apply_preset_camera(s);
+}
+
+void _game_update_preset_showcase(GameState* s, f32 dt)
+{
+	if(!s || !s->presetShowcaseActive)
+		return;
+
+	const uint32 presetCount = draw_get_galaxy_preset_count();
+	if(presetCount == 0u)
+	{
+		s->presetShowcaseActive = false;
+		return;
+	}
+
+	s->presetShowcaseTimer += dt;
+	if(s->presetShowcaseTimer < 6.0f)
+		return;
+
+	s->presetShowcaseTimer -= 6.0f;
+
+	if(s->presetShowcaseIndex + 1u >= presetCount)
+	{
+		s->presetShowcaseActive = false;
+		s->presetShowcaseIndex = presetCount - 1u;
+		s->selectedPreset = (int32)s->presetShowcaseIndex;
+		return;
+	}
+
+	s->presetShowcaseIndex += 1u;
+	s->selectedPreset = (int32)s->presetShowcaseIndex;
+	_game_apply_selected_preset(s);
+	_game_apply_preset_camera(s);
+}
+
 void _game_camera_update(GameCamera* cam, f32 dt, GLFWwindow* window)
 {
 	const ImGuiIO& io = ImGui::GetIO();
@@ -394,6 +461,7 @@ void _game_cursor_pos_callback(GLFWwindow* window, f64 x, f64 y)
 
 void _game_key_callback(GLFWwindow* window, int32 key, int32 scancode, int32 action, int32 mods)
 {
+	GameState* s = (GameState*)glfwGetWindowUserPointer(window);
 	ImGuiIO& io = ImGui::GetIO();
 	if(key >= 0 && key < IM_ARRAYSIZE(io.KeysDown))
 		io.KeysDown[key] = action != GLFW_RELEASE;
@@ -401,6 +469,12 @@ void _game_key_callback(GLFWwindow* window, int32 key, int32 scancode, int32 act
 	io.KeyShift = io.KeysDown[GLFW_KEY_LEFT_SHIFT] || io.KeysDown[GLFW_KEY_RIGHT_SHIFT];
 	io.KeyAlt = io.KeysDown[GLFW_KEY_LEFT_ALT] || io.KeysDown[GLFW_KEY_RIGHT_ALT];
 	io.KeySuper = io.KeysDown[GLFW_KEY_LEFT_SUPER] || io.KeysDown[GLFW_KEY_RIGHT_SUPER];
+
+	if(action == GLFW_PRESS && !io.WantCaptureKeyboard)
+	{
+		if(key == GLFW_KEY_M)
+			_game_start_preset_showcase(s);
+	}
 
 	if(key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
 		glfwSetWindowShouldClose(window, GLFW_TRUE);

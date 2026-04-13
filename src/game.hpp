@@ -29,6 +29,9 @@ struct GameState
 
     GameCamera cam;
 	int32 selectedPreset;
+	bool presetShowcaseActive;
+	float presetShowcaseTimer;
+	uint32 presetShowcaseIndex;
 };
 
 //----------------------------------------------------------------------------//

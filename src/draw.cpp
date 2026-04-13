@@ -59,11 +59,11 @@ static constexpr uint32 DRAW_FILAMENT_PARTICLES_DEFAULT = 19200;
 static const GalaxyPreset GALAXY_PRESETS[] = {
 	{"Sample 1", 13000.0f, 4000.0f, 0.0004f, 0.85f, 0.95f, 40000u, true, 2u, 40.0f, 40.0f, 4000.0f},
 	{"Sample 2", 16000.0f, 4000.0f, 0.0003f, 0.80f, 0.85f, 40000u, true, 0u, 40.0f, 38.0f, 4500.0f},
-	{"Sample 3", 13000.0f, 4000.0f, 0.00064f, 0.90f, 0.90f, 40000u, true, 0u, 0.0f, 41.0f, 4100.0f},
+	{"Sample 3", 13000.0f, 4000.0f, 0.00064f, 0.90f, 0.90f, 40000u, true, 0u, 0.0f, 41.0f, 7000.0f},
 	{"Sample 4", 13000.0f, 4000.0f, 0.0004f, 1.35f, 1.05f, 40000u, true, 0u, 0.0f, 39.0f, 4500.0f},
 	{"Sample 5", 13000.0f, 4500.0f, 0.0002f, 0.65f, 0.95f, 40000u, true, 3u, 72.0f, 42.0f, 4000.0f},
-	{"Sample 6", 15000.0f, 4000.0f, 0.0003f, 1.45f, 1.00f, 40000u, true, 0u, 0.0f, 42.0f, 4500.0f},
-	{"Sample 7", 14000.0f, 12500.0f, 0.0002f, 0.65f, 0.95f, 40000u, true, 3u, 72.0f, 43.0f, 2200.0f},
+	{"Sample 6", 15000.0f, 4000.0f, 0.0003f, 1.45f, 1.00f, 40000u, true, 0u, 0.0f, 42.0f, 6000.0f},
+	{"Sample 7", 14000.0f, 12500.0f, 0.0002f, 0.65f, 0.95f, 40000u, true, 3u, 72.0f, 43.0f, 1200.0f},
 	{"Sample 8", 13000.0f, 1500.0f, 0.0004f, 1.10f, 1.00f, 40000u, true, 1u, 20.0f, 42.0f, 2800.0f},
 	{"Sample 9", 13000.0f, 4000.0f, 0.0004f, 0.85f, 0.95f, 40000u, true, 1u, 20.0f, 41.0f, 4500.0f},
 };
@@ -1083,7 +1083,7 @@ static void _draw_set_default_particle_params(DrawState* s)
 	s->particleGenParams.maxDustOpacity = 0.08f;
 
 	s->particleVertParams.time = 0.0f;
-	s->particleVertParams.timeStepYears = 1000.0f;
+	s->particleVertParams.timeStepYears = 3000.0f;
 	s->particleVertParams.activeParticles = 0;
 	s->particleVertParams.displayFlags = PARTICLE_DISPLAY_STARS | PARTICLE_DISPLAY_DUST | PARTICLE_DISPLAY_FILAMENTS | PARTICLE_DISPLAY_H2;
 	s->particleVertParams.perturbationCount = 2u;
