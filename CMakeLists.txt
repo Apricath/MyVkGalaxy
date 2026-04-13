@@ -19,6 +19,18 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 file(GLOB_RECURSE vkgalaxy_src CONFIGURE_DEPENDS "src/*.cpp" "src/*.c")
 add_executable(${PROJECT_NAME} ${vkgalaxy_src})
 
+if(WIN32 AND NOT ANDROID)
+    set(_SIMPLE_ENGINE_LOCAL_PREFIXES
+        "$ENV{VCPKG_ROOT}/installed/x64-windows"
+        "F:/vcpkg/installed/x64-windows"
+    )
+    foreach(_prefix IN LISTS _SIMPLE_ENGINE_LOCAL_PREFIXES)
+        if(_prefix AND EXISTS "${_prefix}")
+            list(APPEND CMAKE_PREFIX_PATH "${_prefix}")
+        endif()
+    endforeach()
+endif()
+
 # find include diretories and libraries
 if(WIN32)
     find_package(GLFW3 3.3 REQUIRED)

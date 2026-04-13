@@ -1,7 +1,8 @@
-BASE_INPUT_DIR=./assets/shaders
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BASE_INPUT_DIR="$SCRIPT_DIR/assets/shaders"
 BASE_INPUT_DIR_LEN=`expr ${#BASE_INPUT_DIR} + 2`
 
-BASE_OUTPUT_DIR="./assets/spirv/"
+BASE_OUTPUT_DIR="$SCRIPT_DIR/assets/spirv/"
 
 GREEN='\033[0;32m'
 NC='\033[0m'
@@ -23,7 +24,7 @@ walk_dir ()
                 OUTPUT_FILE_DIR=${OUTPUT_FILE%/*}
 
                 if [ ! -d "$OUTPUT_FILE_DIR" ]; then
-                    mkdir $OUTPUT_FILE_DIR
+                    mkdir -p "$OUTPUT_FILE_DIR"
                 fi
 
                 echo "[${NUM}] ${GREEN}Compiling shader $INPUT_FILE ${NC}"

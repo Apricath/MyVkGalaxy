@@ -1,4 +1,5 @@
 #include "game.hpp"
+#include "imgui/imgui.h"
 
 //----------------------------------------------------------------------------//
 
@@ -19,6 +20,7 @@ void _game_camera_scroll(GameCamera* cam, f32 amt);
 
 void _game_cursor_pos_callback(GLFWwindow* window, f64 x, f64 y);
 void _game_key_callback(GLFWwindow* window, int32 key, int32 scancode, int32 action, int32 mods);
+void _game_char_callback(GLFWwindow* window, uint32 codepoint);
 void _game_scroll_callback(GLFWwindow* window, f64 x, f64 y);
 
 //----------------------------------------------------------------------------//
@@ -62,6 +64,7 @@ bool game_init(GameState** state)
 	glfwSetWindowUserPointer(s->drawState->instance->window, s);
 	glfwSetCursorPosCallback(s->drawState->instance->window, _game_cursor_pos_callback);
 	glfwSetKeyCallback(s->drawState->instance->window, _game_key_callback);
+	glfwSetCharCallback(s->drawState->instance->window, _game_char_callback);
 	glfwSetScrollCallback(s->drawState->instance->window, _game_scroll_callback);
 
 	return true;
@@ -102,6 +105,75 @@ void game_main_loop(GameState* s)
 			accumFrames = 0;
 		}
 
+		draw_imgui_begin_frame(s->drawState, dt);
+		ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowSize(ImVec2(420.0f, 560.0f), ImGuiCond_FirstUseEver);
+		if(ImGui::Begin("Galaxy Particle Controls"))
+		{
+			ImGui::Text("FPS %.1f", ImGui::GetIO().Framerate);
+			ImGui::Text("Camera dist %.2f", s->cam.dist);
+			ImGui::Separator();
+
+			bool regenerateParticles = false;
+			int numStars = (int)s->drawState->particleGenParams.numStars;
+			if(ImGui::SliderInt("numStars", &numStars, 1, DRAW_NUM_PARTICLES))
+			{
+				s->drawState->particleGenParams.numStars = (uint32)numStars;
+				s->drawState->particleVertParams.numStars = (uint32)numStars;
+				regenerateParticles = true;
+			}
+
+			if(ImGui::CollapsingHeader("ParticleGenParamsGPU", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				regenerateParticles |= ImGui::SliderFloat("maxRad", &s->drawState->particleGenParams.maxRad, 100.0f, 6000.0f);
+				regenerateParticles |= ImGui::SliderFloat("bulgeRad", &s->drawState->particleGenParams.bulgeRad, 1.0f, 4000.0f);
+				regenerateParticles |= ImGui::SliderFloat("angleOffset", &s->drawState->particleGenParams.angleOffset, 0.0f, 12.56f);
+				regenerateParticles |= ImGui::SliderFloat("eccentricity", &s->drawState->particleGenParams.eccentricity, 0.05f, 2.0f);
+				regenerateParticles |= ImGui::SliderFloat("baseHeight", &s->drawState->particleGenParams.baseHeight, -1000.0f, 1000.0f);
+				regenerateParticles |= ImGui::SliderFloat("height", &s->drawState->particleGenParams.height, 0.0f, 1200.0f);
+				regenerateParticles |= ImGui::SliderFloat("minTemp", &s->drawState->particleGenParams.minTemp, 1000.0f, 12000.0f);
+				regenerateParticles |= ImGui::SliderFloat("maxTemp", &s->drawState->particleGenParams.maxTemp, 1000.0f, 15000.0f);
+				regenerateParticles |= ImGui::SliderFloat("dustBaseTemp", &s->drawState->particleGenParams.dustBaseTemp, 500.0f, 12000.0f);
+				regenerateParticles |= ImGui::SliderFloat("minStarOpacity", &s->drawState->particleGenParams.minStarOpacity, 0.0f, 1.0f);
+				regenerateParticles |= ImGui::SliderFloat("maxStarOpacity", &s->drawState->particleGenParams.maxStarOpacity, 0.0f, 1.0f);
+				regenerateParticles |= ImGui::SliderFloat("minDustOpacity", &s->drawState->particleGenParams.minDustOpacity, 0.0f, 0.1f);
+				regenerateParticles |= ImGui::SliderFloat("maxDustOpacity", &s->drawState->particleGenParams.maxDustOpacity, 0.0f, 0.2f);
+				regenerateParticles |= ImGui::SliderFloat("speed", &s->drawState->particleGenParams.speed, 0.01f, 60.0f);
+			}
+
+			if(ImGui::CollapsingHeader("ParticleParamsVertGPU", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				ImGui::Checkbox("pause time", &s->drawState->particleTimePaused);
+				if(s->drawState->particleTimePaused)
+					ImGui::SliderFloat("time", &s->drawState->particleVertParams.time, 0.0f, 120.0f);
+				else
+					ImGui::Text("time %.2f", s->drawState->particleVertParams.time);
+
+				ImGui::Text("numStars mirrors generator: %u", s->drawState->particleVertParams.numStars);
+				ImGui::SliderFloat("starSize", &s->drawState->particleVertParams.starSize, 0.1f, 100.0f);
+				ImGui::SliderFloat("dustSize", &s->drawState->particleVertParams.dustSize, 1.0f, 2000.0f);
+				ImGui::SliderFloat("h2Size", &s->drawState->particleVertParams.h2Size, 1.0f, 1000.0f);
+				ImGui::SliderFloat("h2Dist", &s->drawState->particleVertParams.h2Dist, 0.0f, 2000.0f);
+			}
+
+			if(ImGui::Button("Regenerate Particles"))
+				regenerateParticles = true;
+
+			if(regenerateParticles)
+			{
+				if(s->drawState->particleGenParams.bulgeRad > s->drawState->particleGenParams.maxRad)
+					s->drawState->particleGenParams.bulgeRad = s->drawState->particleGenParams.maxRad;
+				if(s->drawState->particleGenParams.maxTemp < s->drawState->particleGenParams.minTemp)
+					s->drawState->particleGenParams.maxTemp = s->drawState->particleGenParams.minTemp;
+				if(s->drawState->particleGenParams.maxStarOpacity < s->drawState->particleGenParams.minStarOpacity)
+					s->drawState->particleGenParams.maxStarOpacity = s->drawState->particleGenParams.minStarOpacity;
+				if(s->drawState->particleGenParams.maxDustOpacity < s->drawState->particleGenParams.minDustOpacity)
+					s->drawState->particleGenParams.maxDustOpacity = s->drawState->particleGenParams.minDustOpacity;
+				s->drawState->particleGenerationDirty = true;
+			}
+		}
+		ImGui::End();
+
 		_game_camera_update(&s->cam, dt, s->drawState->instance->window);
 
 		DrawParams drawParams;
@@ -138,6 +210,10 @@ bool _game_camera_init(GameCamera* cam)
 
 void _game_camera_update(GameCamera* cam, f32 dt, GLFWwindow* window)
 {
+	const ImGuiIO& io = ImGui::GetIO();
+	if(io.WantCaptureKeyboard)
+		return;
+
 	f32 camSpeed = 1.0f * dt * cam->dist;
 	f32 angleSpeed = 45.0f * dt;
 	f32 tiltSpeed = 30.0f * dt;
@@ -209,15 +285,29 @@ void _game_cursor_pos_callback(GLFWwindow* window, f64 x, f64 y)
 
 void _game_key_callback(GLFWwindow* window, int32 key, int32 scancode, int32 action, int32 mods)
 {
+	ImGuiIO& io = ImGui::GetIO();
+	if(key >= 0 && key < IM_ARRAYSIZE(io.KeysDown))
+		io.KeysDown[key] = action != GLFW_RELEASE;
+	io.KeyCtrl = io.KeysDown[GLFW_KEY_LEFT_CONTROL] || io.KeysDown[GLFW_KEY_RIGHT_CONTROL];
+	io.KeyShift = io.KeysDown[GLFW_KEY_LEFT_SHIFT] || io.KeysDown[GLFW_KEY_RIGHT_SHIFT];
+	io.KeyAlt = io.KeysDown[GLFW_KEY_LEFT_ALT] || io.KeysDown[GLFW_KEY_RIGHT_ALT];
+	io.KeySuper = io.KeysDown[GLFW_KEY_LEFT_SUPER] || io.KeysDown[GLFW_KEY_RIGHT_SUPER];
+
 	if(key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
 		glfwSetWindowShouldClose(window, GLFW_TRUE);
+}
+
+void _game_char_callback(GLFWwindow* window, uint32 codepoint)
+{
+	ImGui::GetIO().AddInputCharacter((unsigned short)codepoint);
 }
 
 void _game_scroll_callback(GLFWwindow* window, f64 x, f64 y)
 {
 	GameState* s = (GameState*)glfwGetWindowUserPointer(window);
+	draw_imgui_add_scroll(s->drawState, (f32)x, (f32)y);
 
-	if(y != 0.0)
+	if(y != 0.0 && !ImGui::GetIO().WantCaptureMouse)
 		_game_camera_scroll(&s->cam, (f32)y);
 }
 

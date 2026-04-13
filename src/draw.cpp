@@ -6,11 +6,9 @@
 #endif
 #include <stdio.h>
 #include <string.h>
+#include <float.h>
 
 //----------------------------------------------------------------------------//
-
-#define DRAW_NUM_PARTICLES 80128
-#define DRAW_NUM_STARS 75000
 
 #define DRAW_PARTICLE_WORK_GROUP_SIZE 256
 
@@ -38,48 +36,6 @@ struct GridParamsFragGPU
 	f32 thickness;
 	f32 scroll;
 };
-
-//parameters for particle vertex shader
-struct ParticleParamsVertGPU
-{
-	f32 time;
-
-	uint32 numStars;
-
-	f32 starSize;
-	f32 dustSize;
-	f32 h2Size;
-
-	f32 h2Dist;
-};
-
-struct ParticleGenParamsGPU
-{
-	uint32 numStars;
-
-	f32 maxRad;
-	f32 bulgeRad;
-
-	f32 angleOffset;
-	f32 eccentricity;
-
-	f32 baseHeight;
-	f32 height;
-
-	f32 minTemp;
-	f32 maxTemp;
-	f32 dustBaseTemp;
-
-	f32 minStarOpacity;
-	f32 maxStarOpacity;
-
-	f32 minDustOpacity;
-	f32 maxDustOpacity;
-
-	f32 speed;
-};
-
-//----------------------------------------------------------------------------//
 
 static bool _draw_create_depth_buffer(DrawState* state);
 static void _draw_destroy_depth_buffer(DrawState* state);
@@ -127,12 +83,24 @@ static void _draw_destroy_particle_descriptors(DrawState* state);
 
 static bool _draw_initialize_particles(DrawState* state);
 
+static void _draw_set_default_particle_params(DrawState* state);
+
+static bool _draw_create_imgui_pipeline(DrawState* state);
+static void _draw_destroy_imgui_pipeline(DrawState* state);
+
+static bool _draw_create_imgui_font_resources(DrawState* state);
+static void _draw_destroy_imgui_font_resources(DrawState* state);
+
+static void _draw_destroy_imgui_buffers(DrawState* state);
+static bool _draw_ensure_imgui_buffers(DrawState* state, uint32 frameIndex, VkDeviceSize vertexSize, VkDeviceSize indexSize);
+
 //----------------------------------------------------------------------------//
 
 static void _draw_record_render_pass_start_commands(DrawState* s, VkCommandBuffer commandBuffer, uint32 frameIndex, uint32 imageIdx);
 
 static void _draw_record_particle_commands(DrawState* s, DrawParams* params, VkCommandBuffer commandBuffer, uint32 frameIndex, uint32 imageIdx);
 static void _draw_record_grid_commands(DrawState* s, DrawParams* params, VkCommandBuffer commandBuffer, uint32 frameIndex, uint32 imageIdx);
+static void _draw_record_imgui_commands(DrawState* s, VkCommandBuffer commandBuffer, uint32 frameIndex);
 
 //----------------------------------------------------------------------------//
 
@@ -152,6 +120,7 @@ bool draw_init(DrawState** state)
 {
 	*state = (DrawState* )malloc(sizeof(DrawState));
 	DrawState* s = *state;
+	memset(s, 0, sizeof(DrawState));
 
 	//create render state:
 	//---------------
@@ -205,7 +174,40 @@ bool draw_init(DrawState** state)
 	if(!_draw_create_particle_descriptors(s))
 		return false;
 
+	_draw_set_default_particle_params(s);
 	if(!_draw_initialize_particles(s))
+		return false;
+
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO();
+	io.IniFilename = nullptr;
+	io.KeyMap[ImGuiKey_Tab] = GLFW_KEY_TAB;
+	io.KeyMap[ImGuiKey_LeftArrow] = GLFW_KEY_LEFT;
+	io.KeyMap[ImGuiKey_RightArrow] = GLFW_KEY_RIGHT;
+	io.KeyMap[ImGuiKey_UpArrow] = GLFW_KEY_UP;
+	io.KeyMap[ImGuiKey_DownArrow] = GLFW_KEY_DOWN;
+	io.KeyMap[ImGuiKey_PageUp] = GLFW_KEY_PAGE_UP;
+	io.KeyMap[ImGuiKey_PageDown] = GLFW_KEY_PAGE_DOWN;
+	io.KeyMap[ImGuiKey_Home] = GLFW_KEY_HOME;
+	io.KeyMap[ImGuiKey_End] = GLFW_KEY_END;
+	io.KeyMap[ImGuiKey_Insert] = GLFW_KEY_INSERT;
+	io.KeyMap[ImGuiKey_Delete] = GLFW_KEY_DELETE;
+	io.KeyMap[ImGuiKey_Backspace] = GLFW_KEY_BACKSPACE;
+	io.KeyMap[ImGuiKey_Space] = GLFW_KEY_SPACE;
+	io.KeyMap[ImGuiKey_Enter] = GLFW_KEY_ENTER;
+	io.KeyMap[ImGuiKey_Escape] = GLFW_KEY_ESCAPE;
+	io.KeyMap[ImGuiKey_A] = GLFW_KEY_A;
+	io.KeyMap[ImGuiKey_C] = GLFW_KEY_C;
+	io.KeyMap[ImGuiKey_V] = GLFW_KEY_V;
+	io.KeyMap[ImGuiKey_X] = GLFW_KEY_X;
+	io.KeyMap[ImGuiKey_Y] = GLFW_KEY_Y;
+	io.KeyMap[ImGuiKey_Z] = GLFW_KEY_Z;
+	ImGui::StyleColorsDark();
+
+	if(!_draw_create_imgui_pipeline(s))
+		return false;
+
+	if(!_draw_create_imgui_font_resources(s))
 		return false;
 
 	return true;
@@ -214,6 +216,11 @@ bool draw_init(DrawState** state)
 void draw_quit(DrawState* s)
 {
 	vkDeviceWaitIdle(s->instance->device);
+
+	_draw_destroy_imgui_buffers(s);
+	_draw_destroy_imgui_pipeline(s);
+	_draw_destroy_imgui_font_resources(s);
+	ImGui::DestroyContext();
 
 	_draw_destroy_particle_descriptors(s);
 	_draw_destroy_particle_buffer(s);
@@ -238,9 +245,54 @@ void draw_quit(DrawState* s)
 
 //----------------------------------------------------------------------------//
 
+void draw_imgui_begin_frame(DrawState* s, f32 dt)
+{
+	ImGuiIO& io = ImGui::GetIO();
+
+	int32 windowW, windowH;
+	int32 framebufferW, framebufferH;
+	glfwGetWindowSize(s->instance->window, &windowW, &windowH);
+	glfwGetFramebufferSize(s->instance->window, &framebufferW, &framebufferH);
+
+	io.DisplaySize = ImVec2((float)windowW, (float)windowH);
+	if(windowW > 0 && windowH > 0)
+		io.DisplayFramebufferScale = ImVec2((float)framebufferW / windowW, (float)framebufferH / windowH);
+	else
+		io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+
+	io.DeltaTime = dt > 0.0f ? dt : (1.0f / 60.0f);
+
+	double mouseX, mouseY;
+	glfwGetCursorPos(s->instance->window, &mouseX, &mouseY);
+	io.MousePos = ImVec2((float)mouseX, (float)mouseY);
+	io.MouseDown[0] = glfwGetMouseButton(s->instance->window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+	io.MouseDown[1] = glfwGetMouseButton(s->instance->window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+	io.MouseDown[2] = glfwGetMouseButton(s->instance->window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
+	io.MouseWheel += s->imguiMouseWheel;
+	io.MouseWheelH += s->imguiMouseWheelH;
+	s->imguiMouseWheel = 0.0f;
+	s->imguiMouseWheelH = 0.0f;
+
+	ImGui::NewFrame();
+}
+
+void draw_imgui_add_scroll(DrawState* s, f32 x, f32 y)
+{
+	s->imguiMouseWheelH += x;
+	s->imguiMouseWheel += y;
+}
+
+//----------------------------------------------------------------------------//
+
 void draw_render(DrawState* s, DrawParams* params, f32 dt)
 {
 	static uint32 frameIdx = 0;
+
+	if(s->particleGenerationDirty)
+	{
+		if(_draw_initialize_particles(s))
+			s->particleGenerationDirty = false;
+	}
 
 	//wait for fences and get next swapchain image: (essentially just making sure last frame is done):
 	//---------------
@@ -294,6 +346,8 @@ void draw_render(DrawState* s, DrawParams* params, f32 dt)
 
 	_draw_record_grid_commands(s, params, s->commandBuffers[frameIdx], frameIdx, imageIdx);
 	_draw_record_particle_commands(s, params, s->commandBuffers[frameIdx], frameIdx, imageIdx);
+	ImGui::Render();
+	_draw_record_imgui_commands(s, s->commandBuffers[frameIdx], frameIdx);
 
 	//end command buffer:
 	//---------------
@@ -314,7 +368,7 @@ void draw_render(DrawState* s, DrawParams* params, f32 dt)
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &s->commandBuffers[frameIdx];
 	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = &s->renderFinishedSemaphores[frameIdx];
+	submitInfo.pSignalSemaphores = &s->renderFinishedSemaphores[imageIdx];
 
 	vkQueueSubmit(s->instance->graphicsQueue, 1, &submitInfo, s->inFlightFences[frameIdx]);
 
@@ -323,7 +377,7 @@ void draw_render(DrawState* s, DrawParams* params, f32 dt)
 	VkPresentInfoKHR presentInfo = {};
 	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 	presentInfo.waitSemaphoreCount = 1;
-	presentInfo.pWaitSemaphores = &s->renderFinishedSemaphores[frameIdx];
+	presentInfo.pWaitSemaphores = &s->renderFinishedSemaphores[imageIdx];
 	presentInfo.swapchainCount = 1;
 	presentInfo.pSwapchains = &s->instance->swapchain;
 	presentInfo.pImageIndices = &imageIdx;
@@ -542,10 +596,16 @@ static bool _draw_create_sync_objects(DrawState* s)
 
 	for(int32 i = 0; i < FRAMES_IN_FLIGHT; i++)
 		if(vkCreateSemaphore(s->instance->device, &semaphoreInfo, NULL, &s->imageAvailableSemaphores[i]) != VK_SUCCESS ||
-			vkCreateSemaphore(s->instance->device, &semaphoreInfo, NULL, &s->renderFinishedSemaphores[i]) != VK_SUCCESS ||
 			vkCreateFence(s->instance->device, &fenceInfo, NULL, &s->inFlightFences[i]) != VK_SUCCESS)
 		{
 			ERROR_LOG("failed to create sync objects");
+			return false;
+		}
+
+	for(uint32 i = 0; i < s->instance->swapchainImageCount; i++)
+		if(vkCreateSemaphore(s->instance->device, &semaphoreInfo, NULL, &s->renderFinishedSemaphores[i]) != VK_SUCCESS)
+		{
+			ERROR_LOG("failed to create render finished semaphores");
 			return false;
 		}
 
@@ -557,9 +617,11 @@ static void _draw_destroy_sync_objects(DrawState* s)
 	for(int32 i = 0; i < FRAMES_IN_FLIGHT; i++)
 	{
 		vkDestroySemaphore(s->instance->device, s->imageAvailableSemaphores[i], NULL);
-		vkDestroySemaphore(s->instance->device, s->renderFinishedSemaphores[i], NULL);
 		vkDestroyFence(s->instance->device, s->inFlightFences[i], NULL);
 	}
+
+	for(uint32 i = 0; i < s->instance->swapchainImageCount; i++)
+		vkDestroySemaphore(s->instance->device, s->renderFinishedSemaphores[i], NULL);
 }
 
 static bool _draw_create_camera_buffer(DrawState* s)
@@ -626,8 +688,8 @@ static bool _draw_create_grid_pipeline(DrawState* s)
 	//set shaders:
 	//---------------
 	uint64 vertCodeSize, fragCodeSize;
-	uint32 *vertCode = vkh_load_spirv("assets/spirv/grid.vert.spv", &vertCodeSize);
-	uint32 *fragCode = vkh_load_spirv("assets/spirv/grid.frag.spv", &fragCodeSize);
+	uint32 *vertCode = vkh_load_spirv("../../assets/spirv/grid.vert.spv", &vertCodeSize);
+	uint32 *fragCode = vkh_load_spirv("../../assets/spirv/grid.frag.spv", &fragCodeSize);
 
 	VkShaderModule vertModule = vkh_create_shader_module(s->instance, vertCodeSize, vertCode);
 	VkShaderModule fragModule = vkh_create_shader_module(s->instance, fragCodeSize, fragCode);
@@ -778,8 +840,8 @@ static bool _draw_create_particle_pipeline(DrawState* s)
 	//set shaders:
 	//---------------
 	uint64 vertCodeSize, fragCodeSize;
-	uint32 *vertCode = vkh_load_spirv("assets/spirv/particle.vert.spv", &vertCodeSize);
-	uint32 *fragCode = vkh_load_spirv("assets/spirv/particle.frag.spv", &fragCodeSize);
+	uint32 *vertCode = vkh_load_spirv("../../assets/spirv/particle.vert.spv", &vertCodeSize);
+	uint32 *fragCode = vkh_load_spirv("../../assets/spirv/particle.frag.spv", &fragCodeSize);
 
 	VkShaderModule vertModule = vkh_create_shader_module(s->instance, vertCodeSize, vertCode);
 	VkShaderModule fragModule = vkh_create_shader_module(s->instance, fragCodeSize, fragCode);
@@ -921,6 +983,363 @@ static void _draw_destroy_particle_descriptors(DrawState* s)
 
 //----------------------------------------------------------------------------//
 
+static void _draw_set_default_particle_params(DrawState* s)
+{
+	s->particleGenParams.numStars = DRAW_NUM_STARS;
+	s->particleGenParams.maxRad = 3500.0f;
+	s->particleGenParams.bulgeRad = 1250.0f;
+	s->particleGenParams.angleOffset = 6.28f;
+	s->particleGenParams.eccentricity = 0.85f;
+	s->particleGenParams.baseHeight = 300.0f;
+	s->particleGenParams.height = 250.0f;
+	s->particleGenParams.minTemp = 3000.0f;
+	s->particleGenParams.maxTemp = 9000.0f;
+	s->particleGenParams.dustBaseTemp = 4000.0f;
+	s->particleGenParams.minStarOpacity = 0.1f;
+	s->particleGenParams.maxStarOpacity = 0.5f;
+	s->particleGenParams.minDustOpacity = 0.01f;
+	s->particleGenParams.maxDustOpacity = 0.05f;
+	s->particleGenParams.speed = 10.0f;
+
+	s->particleVertParams.time = 0.0f;
+	s->particleVertParams.numStars = s->particleGenParams.numStars;
+	s->particleVertParams.starSize = 10.0f;
+	s->particleVertParams.dustSize = 500.0f;
+	s->particleVertParams.h2Size = 150.0f;
+	s->particleVertParams.h2Dist = 300.0f;
+
+	s->particleGenerationDirty = false;
+	s->particleTimePaused = false;
+}
+
+static bool _draw_create_imgui_pipeline(DrawState* s)
+{
+	s->imguiPipeline = vkh_pipeline_create();
+	if(!s->imguiPipeline)
+		return false;
+
+	uint64 vertCodeSize, fragCodeSize;
+	uint32* vertCode = vkh_load_spirv("../../assets/spirv/imgui.vert.spv", &vertCodeSize);
+	uint32* fragCode = vkh_load_spirv("../../assets/spirv/imgui.frag.spv", &fragCodeSize);
+	if(!vertCode || !fragCode)
+		return false;
+
+	VkShaderModule vertModule = vkh_create_shader_module(s->instance, vertCodeSize, vertCode);
+	VkShaderModule fragModule = vkh_create_shader_module(s->instance, fragCodeSize, fragCode);
+	vkh_pipeline_set_vert_shader(s->imguiPipeline, vertModule);
+	vkh_pipeline_set_frag_shader(s->imguiPipeline, fragModule);
+
+	VkDescriptorSetLayoutBinding samplerBinding = {};
+	samplerBinding.binding = 0;
+	samplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	samplerBinding.descriptorCount = 1;
+	samplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	vkh_pipeline_add_desc_set_binding(s->imguiPipeline, samplerBinding);
+
+	vkh_pipeline_add_dynamic_state(s->imguiPipeline, VK_DYNAMIC_STATE_VIEWPORT);
+	vkh_pipeline_add_dynamic_state(s->imguiPipeline, VK_DYNAMIC_STATE_SCISSOR);
+
+	VkVertexInputBindingDescription binding = {};
+	binding.binding = 0;
+	binding.stride = sizeof(ImDrawVert);
+	binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+	vkh_pipeline_add_vertex_input_binding(s->imguiPipeline, binding);
+
+	VkVertexInputAttributeDescription posAttrib = {};
+	posAttrib.location = 0;
+	posAttrib.binding = 0;
+	posAttrib.format = VK_FORMAT_R32G32_SFLOAT;
+	posAttrib.offset = IM_OFFSETOF(ImDrawVert, pos);
+	vkh_pipeline_add_vertex_input_attrib(s->imguiPipeline, posAttrib);
+
+	VkVertexInputAttributeDescription uvAttrib = {};
+	uvAttrib.location = 1;
+	uvAttrib.binding = 0;
+	uvAttrib.format = VK_FORMAT_R32G32_SFLOAT;
+	uvAttrib.offset = IM_OFFSETOF(ImDrawVert, uv);
+	vkh_pipeline_add_vertex_input_attrib(s->imguiPipeline, uvAttrib);
+
+	VkVertexInputAttributeDescription colorAttrib = {};
+	colorAttrib.location = 2;
+	colorAttrib.binding = 0;
+	colorAttrib.format = VK_FORMAT_R8G8B8A8_UNORM;
+	colorAttrib.offset = IM_OFFSETOF(ImDrawVert, col);
+	vkh_pipeline_add_vertex_input_attrib(s->imguiPipeline, colorAttrib);
+
+	VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
+	colorBlendAttachment.blendEnable = VK_TRUE;
+	colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+	colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+	colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	vkh_pipeline_add_color_blend_attachment(s->imguiPipeline, colorBlendAttachment);
+
+	VkPushConstantRange pushConstant = {};
+	pushConstant.offset = 0;
+	pushConstant.size = sizeof(DrawImGuiPushConstants);
+	pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	vkh_pipeline_add_push_constant(s->imguiPipeline, pushConstant);
+
+	vkh_pipeline_set_input_assembly_state(s->imguiPipeline, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE);
+	vkh_pipeline_set_raster_state(s->imguiPipeline, VK_FALSE, VK_FALSE, VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE,
+		VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0.0f, 0.0f, 0.0f);
+	vkh_pipeline_set_multisample_state(s->imguiPipeline, VK_SAMPLE_COUNT_1_BIT, VK_FALSE, 1.0f, NULL, VK_FALSE, VK_FALSE);
+	vkh_pipeline_set_depth_stencil_state(s->imguiPipeline, VK_FALSE, VK_FALSE, VK_COMPARE_OP_ALWAYS, VK_FALSE, VK_FALSE, {}, {}, 0.0f, 1.0f);
+	vkh_pipeline_set_color_blend_state(s->imguiPipeline, VK_FALSE, VK_LOGIC_OP_COPY, 0.0f, 0.0f, 0.0f, 0.0f);
+
+	bool success = vkh_pipeline_generate(s->imguiPipeline, s->instance, s->finalRenderPass, 0);
+
+	vkh_free_spirv(vertCode);
+	vkh_free_spirv(fragCode);
+	vkh_destroy_shader_module(s->instance, vertModule);
+	vkh_destroy_shader_module(s->instance, fragModule);
+
+	return success;
+}
+
+static void _draw_destroy_imgui_pipeline(DrawState* s)
+{
+	if(s->imguiDescriptorSets)
+	{
+		vkh_descriptor_sets_cleanup(s->imguiDescriptorSets, s->instance);
+		vkh_descriptor_sets_destroy(s->imguiDescriptorSets);
+		s->imguiDescriptorSets = nullptr;
+	}
+
+	if(s->imguiPipeline)
+	{
+		vkh_pipeline_cleanup(s->imguiPipeline, s->instance);
+		vkh_pipeline_destroy(s->imguiPipeline);
+		s->imguiPipeline = nullptr;
+	}
+}
+
+static bool _draw_create_imgui_font_resources(DrawState* s)
+{
+	ImGuiIO& io = ImGui::GetIO();
+	unsigned char* pixels = nullptr;
+	int width = 0;
+	int height = 0;
+	io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+
+	VkDeviceSize uploadSize = (VkDeviceSize)(width * height * 4);
+	VkBuffer stagingBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+	stagingBuffer = vkh_create_buffer(s->instance, uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingMemory);
+
+	void* mappedMemory = nullptr;
+	vkMapMemory(s->instance->device, stagingMemory, 0, uploadSize, 0, &mappedMemory);
+	memcpy(mappedMemory, pixels, (size_t)uploadSize);
+	vkUnmapMemory(s->instance->device, stagingMemory);
+
+	s->imguiFontImage = vkh_create_image(s->instance, width, height, 1, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM,
+		VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &s->imguiFontMemory);
+	s->imguiFontImageView = vkh_create_image_view(s->instance, s->imguiFontImage, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+
+	vkh_transition_image_layout(s->instance, s->imguiFontImage, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
+	vkh_copy_buffer_to_image(s->instance, stagingBuffer, s->imguiFontImage, (uint32)width, (uint32)height);
+	vkh_transition_image_layout(s->instance, s->imguiFontImage, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
+	vkh_destroy_buffer(s->instance, stagingBuffer, stagingMemory);
+
+	VkSamplerCreateInfo samplerInfo = {};
+	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	samplerInfo.magFilter = VK_FILTER_LINEAR;
+	samplerInfo.minFilter = VK_FILTER_LINEAR;
+	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.minLod = 0.0f;
+	samplerInfo.maxLod = 0.0f;
+	samplerInfo.maxAnisotropy = 1.0f;
+	if(vkCreateSampler(s->instance->device, &samplerInfo, nullptr, &s->imguiFontSampler) != VK_SUCCESS)
+		return false;
+
+	s->imguiDescriptorSets = vkh_descriptor_sets_create(1);
+	if(!s->imguiDescriptorSets)
+		return false;
+
+	VkDescriptorImageInfo fontImageInfo = {};
+	fontImageInfo.sampler = s->imguiFontSampler;
+	fontImageInfo.imageView = s->imguiFontImageView;
+	fontImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	vkh_descriptor_sets_add_images(s->imguiDescriptorSets, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 0, 0, 1, &fontImageInfo);
+
+	if(!vkh_desctiptor_sets_generate(s->imguiDescriptorSets, s->instance, s->imguiPipeline->descriptorLayout))
+		return false;
+
+	io.Fonts->TexID = (ImTextureID)(intptr_t)1;
+	return true;
+}
+
+static void _draw_destroy_imgui_font_resources(DrawState* s)
+{
+	if(s->imguiFontSampler)
+		vkDestroySampler(s->instance->device, s->imguiFontSampler, nullptr);
+	if(s->imguiFontImageView)
+		vkh_destroy_image_view(s->instance, s->imguiFontImageView);
+	if(s->imguiFontImage)
+		vkh_destroy_image(s->instance, s->imguiFontImage, s->imguiFontMemory);
+	s->imguiFontSampler = VK_NULL_HANDLE;
+	s->imguiFontImageView = VK_NULL_HANDLE;
+	s->imguiFontImage = VK_NULL_HANDLE;
+	s->imguiFontMemory = VK_NULL_HANDLE;
+}
+
+static void _draw_destroy_imgui_buffers(DrawState* s)
+{
+	for(uint32 i = 0; i < FRAMES_IN_FLIGHT; ++i)
+	{
+		if(s->imguiVertexBuffers[i])
+			vkh_destroy_buffer(s->instance, s->imguiVertexBuffers[i], s->imguiVertexBuffersMemory[i]);
+		if(s->imguiIndexBuffers[i])
+			vkh_destroy_buffer(s->instance, s->imguiIndexBuffers[i], s->imguiIndexBuffersMemory[i]);
+
+		s->imguiVertexBuffers[i] = VK_NULL_HANDLE;
+		s->imguiVertexBuffersMemory[i] = VK_NULL_HANDLE;
+		s->imguiVertexBufferSizes[i] = 0;
+		s->imguiIndexBuffers[i] = VK_NULL_HANDLE;
+		s->imguiIndexBuffersMemory[i] = VK_NULL_HANDLE;
+		s->imguiIndexBufferSizes[i] = 0;
+	}
+}
+
+static bool _draw_ensure_imgui_buffers(DrawState* s, uint32 frameIndex, VkDeviceSize vertexSize, VkDeviceSize indexSize)
+{
+	if(!s->imguiVertexBuffers[frameIndex] || s->imguiVertexBufferSizes[frameIndex] < vertexSize)
+	{
+		if(s->imguiVertexBuffers[frameIndex])
+			vkh_destroy_buffer(s->instance, s->imguiVertexBuffers[frameIndex], s->imguiVertexBuffersMemory[frameIndex]);
+
+		s->imguiVertexBuffers[frameIndex] = vkh_create_buffer(s->instance, vertexSize,
+			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			&s->imguiVertexBuffersMemory[frameIndex]);
+		s->imguiVertexBufferSizes[frameIndex] = vertexSize;
+	}
+
+	if(!s->imguiIndexBuffers[frameIndex] || s->imguiIndexBufferSizes[frameIndex] < indexSize)
+	{
+		if(s->imguiIndexBuffers[frameIndex])
+			vkh_destroy_buffer(s->instance, s->imguiIndexBuffers[frameIndex], s->imguiIndexBuffersMemory[frameIndex]);
+
+		s->imguiIndexBuffers[frameIndex] = vkh_create_buffer(s->instance, indexSize,
+			VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			&s->imguiIndexBuffersMemory[frameIndex]);
+		s->imguiIndexBufferSizes[frameIndex] = indexSize;
+	}
+
+	return s->imguiVertexBuffers[frameIndex] && s->imguiIndexBuffers[frameIndex];
+}
+
+static void _draw_record_imgui_commands(DrawState* s, VkCommandBuffer commandBuffer, uint32 frameIndex)
+{
+	ImDrawData* drawData = ImGui::GetDrawData();
+	if(!drawData || drawData->TotalVtxCount <= 0 || drawData->TotalIdxCount <= 0)
+		return;
+
+	const ImGuiIO& io = ImGui::GetIO();
+	const ImVec2 framebufferScale = io.DisplayFramebufferScale;
+	const ImVec2 displaySize = io.DisplaySize;
+	if(displaySize.x <= 0.0f || displaySize.y <= 0.0f)
+		return;
+
+	int32 framebufferW = (int32)(displaySize.x * framebufferScale.x);
+	int32 framebufferH = (int32)(displaySize.y * framebufferScale.y);
+	if(framebufferW <= 0 || framebufferH <= 0)
+		return;
+
+	VkDeviceSize vertexSize = (VkDeviceSize)drawData->TotalVtxCount * sizeof(ImDrawVert);
+	VkDeviceSize indexSize = (VkDeviceSize)drawData->TotalIdxCount * sizeof(ImDrawIdx);
+	if(!_draw_ensure_imgui_buffers(s, frameIndex, vertexSize, indexSize))
+		return;
+
+	ImDrawVert* vertexDst = nullptr;
+	ImDrawIdx* indexDst = nullptr;
+	vkMapMemory(s->instance->device, s->imguiVertexBuffersMemory[frameIndex], 0, vertexSize, 0, (void**)&vertexDst);
+	vkMapMemory(s->instance->device, s->imguiIndexBuffersMemory[frameIndex], 0, indexSize, 0, (void**)&indexDst);
+
+	for(int32 listIndex = 0; listIndex < drawData->CmdListsCount; ++listIndex)
+	{
+		const ImDrawList* cmdList = drawData->CmdLists[listIndex];
+		memcpy(vertexDst, cmdList->VtxBuffer.Data, (size_t)cmdList->VtxBuffer.Size * sizeof(ImDrawVert));
+		memcpy(indexDst, cmdList->IdxBuffer.Data, (size_t)cmdList->IdxBuffer.Size * sizeof(ImDrawIdx));
+		vertexDst += cmdList->VtxBuffer.Size;
+		indexDst += cmdList->IdxBuffer.Size;
+	}
+
+	vkUnmapMemory(s->instance->device, s->imguiVertexBuffersMemory[frameIndex]);
+	vkUnmapMemory(s->instance->device, s->imguiIndexBuffersMemory[frameIndex]);
+
+	VkViewport viewport = {};
+	viewport.x = 0.0f;
+	viewport.y = 0.0f;
+	viewport.width = (float)framebufferW;
+	viewport.height = (float)framebufferH;
+	viewport.minDepth = 0.0f;
+	viewport.maxDepth = 1.0f;
+	vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+	VkDeviceSize vertexOffset = 0;
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, s->imguiPipeline->pipeline);
+	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, s->imguiPipeline->layout, 0, 1, &s->imguiDescriptorSets->sets[0], 0, nullptr);
+	vkCmdBindVertexBuffers(commandBuffer, 0, 1, &s->imguiVertexBuffers[frameIndex], &vertexOffset);
+	vkCmdBindIndexBuffer(commandBuffer, s->imguiIndexBuffers[frameIndex], 0, sizeof(ImDrawIdx) == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+
+	DrawImGuiPushConstants pushConstants = {};
+	pushConstants.scale = qm::vec2(2.0f / displaySize.x, 2.0f / displaySize.y);
+	pushConstants.translate = qm::vec2(-1.0f, -1.0f);
+	vkCmdPushConstants(commandBuffer, s->imguiPipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(DrawImGuiPushConstants), &pushConstants);
+
+	int32 globalVertexOffset = 0;
+	uint32 globalIndexOffset = 0;
+
+	for(int32 listIndex = 0; listIndex < drawData->CmdListsCount; ++listIndex)
+	{
+		const ImDrawList* cmdList = drawData->CmdLists[listIndex];
+		for(int32 cmdIndex = 0; cmdIndex < cmdList->CmdBuffer.Size; ++cmdIndex)
+		{
+			const ImDrawCmd* cmd = &cmdList->CmdBuffer[cmdIndex];
+			if(cmd->UserCallback)
+			{
+				cmd->UserCallback(cmdList, cmd);
+				continue;
+			}
+
+			ImVec4 clipRect = cmd->ClipRect;
+			clipRect.x *= framebufferScale.x;
+			clipRect.y *= framebufferScale.y;
+			clipRect.z *= framebufferScale.x;
+			clipRect.w *= framebufferScale.y;
+			if(clipRect.x < 0.0f) clipRect.x = 0.0f;
+			if(clipRect.y < 0.0f) clipRect.y = 0.0f;
+			if(clipRect.z > framebufferW) clipRect.z = (float)framebufferW;
+			if(clipRect.w > framebufferH) clipRect.w = (float)framebufferH;
+			if(clipRect.x >= clipRect.z || clipRect.y >= clipRect.w)
+			{
+				globalIndexOffset += cmd->ElemCount;
+				continue;
+			}
+			VkRect2D scissor = {};
+			scissor.offset.x = (int32)clipRect.x;
+			scissor.offset.y = (int32)clipRect.y;
+			scissor.extent.width = (uint32)(clipRect.z - clipRect.x);
+			scissor.extent.height = (uint32)(clipRect.w - clipRect.y);
+			vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+			vkCmdDrawIndexed(commandBuffer, cmd->ElemCount, 1, globalIndexOffset, globalVertexOffset, 0);
+			globalIndexOffset += cmd->ElemCount;
+		}
+
+		globalVertexOffset += cmdList->VtxBuffer.Size;
+	}
+}
+
+//----------------------------------------------------------------------------//
+
 static bool _draw_initialize_particles(DrawState* s)
 {
 	VKHcomputePipeline* pipeline;
@@ -933,7 +1352,7 @@ static bool _draw_initialize_particles(DrawState* s)
 		return false;
 
 	uint64 computeCodeSize;
-	uint32 *computeCode = vkh_load_spirv("assets/spirv/particle_generate.comp.spv", &computeCodeSize);
+	uint32 *computeCode = vkh_load_spirv("../../assets/spirv/particle_generate.comp.spv", &computeCodeSize);
 	VkShaderModule computeModule = vkh_create_shader_module(s->instance, computeCodeSize, computeCode);
 	vkh_compute_pipeline_set_shader(pipeline, computeModule);
 
@@ -977,27 +1396,10 @@ static bool _draw_initialize_particles(DrawState* s)
 	//---------------
 	VkCommandBuffer commandBuf = vkh_start_single_time_command(s->instance);
 
-	ParticleGenParamsGPU params;
-	params.numStars = DRAW_NUM_STARS;
-	params.maxRad = 3500.0f;
-	params.bulgeRad = 1250.0f;
-	params.angleOffset = 6.28f;
-	params.eccentricity = 0.85f;
-	params.baseHeight = 300.0f;
-	params.height = 250.0f;
-	params.minTemp = 3000.0f;
-	params.maxTemp = 9000.0f;
-	params.dustBaseTemp = 4000.0f;
-	params.minStarOpacity = 0.1f;
-	params.maxStarOpacity = 0.5f;
-	params.minDustOpacity = 0.01f;
-	params.maxDustOpacity = 0.05f;
-	params.speed = 10.0f;
-
 	uint32 dynamicOffset = 0;
 	vkCmdBindPipeline(commandBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 	vkCmdBindDescriptorSets(commandBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &descriptorSets->sets[0], 1, &dynamicOffset);
-	vkCmdPushConstants(commandBuf, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ParticleGenParamsGPU), &params);
+	vkCmdPushConstants(commandBuf, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ParticleGenParamsGPU), &s->particleGenParams);
 	vkCmdDispatch(commandBuf, DRAW_NUM_PARTICLES / DRAW_PARTICLE_WORK_GROUP_SIZE, 1, 1);
 
 	vkh_end_single_time_command(s->instance, commandBuf);
@@ -1031,12 +1433,11 @@ static void _draw_record_render_pass_start_commands(DrawState* s, VkCommandBuffe
 	renderBeginInfo.renderArea.offset = {0, 0};
 	renderBeginInfo.renderArea.extent = s->instance->swapchainExtent;
 
-	VkClearValue clearValues[3];
+	VkClearValue clearValues[2];
 	clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
 	clearValues[1].depthStencil = {1.0f, 0};
-	clearValues[2].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
 
-	renderBeginInfo.clearValueCount = 3;
+	renderBeginInfo.clearValueCount = 2;
 	renderBeginInfo.pClearValues = clearValues;
 
 	vkCmdBeginRenderPass(commandBuffer, &renderBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
@@ -1118,15 +1519,11 @@ static void _draw_record_particle_commands(DrawState* s, DrawParams* params, VkC
 
 	//send vertex stage params:
 	//---------------
-	ParticleParamsVertGPU vertParams;
-	vertParams.time = (float)glfwGetTime();
-	vertParams.numStars = DRAW_NUM_STARS;
-	vertParams.starSize = 10.0f;
-	vertParams.dustSize = 500.0f;
-	vertParams.h2Size = 150.0f;
-	vertParams.h2Dist = 300.0f;
+	if(!s->particleTimePaused)
+		s->particleVertParams.time = (float)glfwGetTime();
+	s->particleVertParams.numStars = s->particleGenParams.numStars;
 
-	vkCmdPushConstants(commandBuffer, s->particlePipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ParticleParamsVertGPU), &vertParams);
+	vkCmdPushConstants(commandBuffer, s->particlePipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ParticleParamsVertGPU), &s->particleVertParams);
 
 	//draw:
 	//---------------

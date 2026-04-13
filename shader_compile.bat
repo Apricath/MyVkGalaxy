@@ -1,18 +1,18 @@
 @echo off
 Setlocal EnableDelayedExpansion
 
-cd assets/shaders/
+set "SCRIPT_DIR=%~dp0"
+set "INPUT_DIR=%SCRIPT_DIR%assets\shaders"
+set "OUTPUT_DIR=%SCRIPT_DIR%assets\spirv"
 
-for /r %%i in (*) do (
+for /r "%INPUT_DIR%" %%i in (*) do (
 	set input=%%i
-	set output=!input:\assets\shaders\=\assets\spirv\!.spv
+	set output=!input:%INPUT_DIR%=%OUTPUT_DIR%!.spv
 
 	set pathOfInput=%%~dpi
-	set pathToCreate=!pathOfInput:\assets\shaders\=\assets\spirv\!
+	set pathToCreate=!pathOfInput:%INPUT_DIR%=%OUTPUT_DIR%!
 	mkdir !pathToCreate! 2>NUL
 
 	echo Compiling shader %%i
 	glslc !input! -o !output!
 )
-
-cd ../..
